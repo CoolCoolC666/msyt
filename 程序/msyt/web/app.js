@@ -265,14 +265,78 @@ function filters() {
   const p = new URLSearchParams();
   const q = g('f-q').trim();
   if (q) p.set('q', q);
-  ['scope', 'sort', 'category', 'state', 'group', 'district', 'dept', 'light'].forEach(k => {
-    if (g(k)) p.set(k, g(k));
+  // ★★ 筛选器的 **DOM id 全都带 f- 前缀**（f-category / f-state / f-group …）。
+  //   这里必须按 'f-' + 键 去取值。
+  //   旧写法 g('category') 找的是 #category → 永远是 null → **所有下拉筛选
+  //   被静默丢掉**，表现就是「下拉框选了条件、结果还是全量」（2026-10-24 用户实测）。
+  ['scope', 'sort', 'category', 'state', 'mailbox', 'group', 'district',
+   'dept', 'light'].forEach(k => {
+    const v = g('f-' + k);
+    if (v) p.set(k, v);
   });
   if (g('f-from')) p.set('date_from', g('f-from'));
   if (g('f-to')) p.set('date_to', g('f-to'));
   p.set('limit', state.limit);
   p.set('offset', (state.page - 1) * state.limit);
   return p;
+}
+
+/** 当前生效的筛选条件（给人看的「我现在在筛什么」）。 */
+function activeFilters() {
+  const g = id => { const e = $('#' + id); return e ? e.value : ''; };
+  const names = {
+    category: '类别', state: '状态', mailbox: '留言箱', group: '分组',
+    district: '区县市', dept: '部门', light: '时效灯',
+  };
+  const out = [];
+  for (const [k, label] of Object.entries(names)) {
+    const el = $('#f-' + k);
+    if (!el || !el.value) continue;
+    const opt = el.options[el.selectedIndex];
+    const txt = (opt && opt.textContent || el.value).trim();
+    if (!txt || txt.startsWith('全部')) continue;
+    out.push({ key: k, label, value: el.value, text: txt });
+  }
+  const d1 = g('f-from'), d2 = g('f-to');
+  if (d1) out.push({ key: 'date_from', label: '起始', value: d1, text: d1 });
+  if (d2) out.push({ key: 'date_to', label: '截止', value: d2, text: d2 });
+  return out;
+}
+
+/** 按某个标签筛选（点表格里的类别 / 状态 / 时效灯徽章时用）。 */
+function applyTagFilter(key, value) {
+  const el = $('#f-' + key);
+  if (!el) return;
+  // 选项不存在就补一个（表里的值未必在字典里）
+  let found = false;
+  for (const o of el.options) { if (o.value === value) { found = true; break; } }
+  if (!found) {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = value;
+    el.appendChild(o);
+  }
+  el.value = value;
+  state.page = 1;
+  loadThreads();
+}
+
+/** 把「当前生效的筛选条件」显示出来，点一下 chip 就能去掉那条。 */
+function renderActiveFilters() {
+  const box = $('#active-filters');
+  if (!box) return;
+  const list = activeFilters();
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '当前筛选：' + list.map(f =>
+    `<span class="chip" data-key="${f.key}" title="点一下去掉这个条件">`
+    + `${esc(f.label)}：${esc(f.text)} ✕</span>`).join('');
+  $$('#active-filters .chip').forEach(c => {
+    c.onclick = () => {
+      const el = $('#f-' + c.dataset.key);
+      if (el) el.value = '';
+      state.page = 1;
+      loadThreads();
+    };
+  });
 }
 
 async function loadThreads() {
@@ -301,10 +365,14 @@ async function loadThreads() {
         <td class="num sub2">${r.tid}</td>
         <td class="title"><a href="javascript:void 0">${esc(r.title)}</a>
           <div class="sub2">${esc(r.author || '')} · 浏览 ${num(r.views)}</div></td>
-        <td>${esc(r.dept_name || '')}${r.dept_district ? `<div class="sub2">${esc(r.dept_district)}</div>` : ''}</td>
-        <td class="nowrap">${esc(r.category || '')}</td>
-        <td class="nowrap">${stateBadge(r.state)}</td>
-        <td class="nowrap">${lightBadge(r.light_code, r.light_name)}</td>
+        <td><span class="tagfilter" data-tag="dept" data-val="${esc(r.dept_id ?? '')}"
+              title="按这个部门筛选">${esc(r.dept_name || '')}</span>${r.dept_district ? `<div class="sub2">${esc(r.dept_district)}</div>` : ''}</td>
+        <td class="nowrap"><span class="tagfilter" data-tag="category"
+              data-val="${esc(r.category || '')}" title="按这个类别筛选">${esc(r.category || '')}</span></td>
+        <td class="nowrap"><span class="tagfilter" data-tag="state"
+              data-val="${esc(r.state || '')}" title="按这个受理状态筛选">${stateBadge(r.state)}</span></td>
+        <td class="nowrap"><span class="tagfilter" data-tag="light"
+              data-val="${esc(r.light_code || '')}" title="按这个时效灯筛选">${lightBadge(r.light_code, r.light_name)}</span></td>
         <td class="nowrap sub2">${esc(r.pub_time || '')}</td>
         <td class="num">${num(r.replies)}</td>
         <td class="nowrap">${detailBadge(r.detail_state)}</td>
@@ -314,6 +382,18 @@ async function loadThreads() {
   $$('#t-threads tr.clickable').forEach(tr => {
     tr.onclick = () => openThread(tr.dataset.tid);
   });
+  // ★ 标签可点：点类别/状态/时效灯/部门 → 直接按它筛（别开详情抽屉）
+  $$('#t-threads .tagfilter').forEach(el => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      const v = el.dataset.val || '';
+      if (!v) return;
+      applyTagFilter(el.dataset.tag, v);
+    };
+  });
+
+  renderActiveFilters();
 
   const pages = Math.max(1, Math.ceil(res.total / state.limit));
   $('#pg-text').textContent = `第 ${state.page} / ${pages} 页`;
@@ -325,11 +405,25 @@ function goto(p) { state.page = Math.max(1, p); loadThreads(); }
 $('#btn-search').onclick = () => { state.page = 1; loadThreads(); };
 $('#btn-reset').onclick = () => {
   ['f-q', 'f-from', 'f-to'].forEach(i => $('#' + i).value = '');
-  ['f-scope', 'f-sort', 'f-category', 'f-state', 'f-group', 'f-district',
-   'f-dept', 'f-light'].forEach(i => { if ($('#' + i)) $('#' + i).value = ''; });
+  ['f-scope', 'f-sort', 'f-category', 'f-state', 'f-mailbox', 'f-group',
+   'f-district', 'f-dept', 'f-light'].forEach(i => {
+    const el = $('#' + i);
+    if (el) el.value = '';      // select 回落到第一项（全部 / 默认）
+  });
   state.page = 1; loadThreads();
 };
 $('#f-q').addEventListener('keydown', e => { if (e.key === 'Enter') { state.page = 1; loadThreads(); } });
+
+// ★ 下拉框一改就自动检索（用户改完条件还要再点一次「检索」很容易忘）
+['f-category', 'f-state', 'f-mailbox', 'f-group', 'f-district', 'f-dept',
+ 'f-light'].forEach(id => {
+  const el = $('#' + id);
+  if (el) el.onchange = () => { state.page = 1; loadThreads(); };
+});
+['f-from', 'f-to'].forEach(id => {
+  const el = $('#' + id);
+  if (el) el.onchange = () => { state.page = 1; loadThreads(); };
+});
 $('#pg-first').onclick = () => goto(1);
 $('#pg-prev').onclick = () => goto(state.page - 1);
 $('#pg-next').onclick = () => goto(state.page + 1);
