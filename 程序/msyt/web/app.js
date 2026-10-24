@@ -327,9 +327,9 @@ function renderActiveFilters() {
   const list = activeFilters();
   if (!list.length) { box.innerHTML = ''; return; }
   box.innerHTML = '当前筛选：' + list.map(f =>
-    `<span class="chip" data-key="${f.key}" title="点一下去掉这个条件">`
+    `<span class="fchip" data-key="${f.key}" title="点一下去掉这个条件">`
     + `${esc(f.label)}：${esc(f.text)} ✕</span>`).join('');
-  $$('#active-filters .chip').forEach(c => {
+  $$('#active-filters .fchip').forEach(c => {
     c.onclick = () => {
       const el = $('#f-' + c.dataset.key);
       if (el) el.value = '';

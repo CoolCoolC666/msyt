@@ -25,13 +25,15 @@ print(f"共 {len(files)} 个测试脚本\n" + "=" * 70)
 total_ok = total_fail = total_n = 0
 for fn in files:
     t0 = time.time()
+    p = None                      # ★ 必须先置空：超时分支里 p 从未被赋值，
+                                   #   否则会沿用**上一个**脚本的 returncode → 误判通过
     try:
         p = subprocess.run([PY, os.path.join(HERE, fn)], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            env=ENV, timeout=600)
         out = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
-        out = "超时"
+        out = "★ 超时（600s）—— 该脚本依赖真实链路/长任务，需单独排查"
     m = None
     for line in reversed(out.splitlines()):
         m = PAT.search(line)
@@ -41,8 +43,9 @@ for fn in files:
         n, ok, bad = int(m.group(1)), int(m.group(2)), int(m.group(3))
     else:
         n = ok = 0
-        bad = 1 if p.returncode != 0 else 0
-        if "FAIL" in out:
+        rc = p.returncode if p is not None else -1
+        bad = 1
+        if "[FAIL]" in out:
             bad = out.count("[FAIL]")
             ok = out.count("[PASS]")
             n = ok + bad
