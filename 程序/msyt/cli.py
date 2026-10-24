@@ -357,7 +357,8 @@ def cmd_agent(args) -> int:
                task=args.task or "", verbose=not args.quiet,
                heartbeat=args.heartbeat, fail_limit=args.fail_limit,
                token=args.token or "", ticket=args.ticket or "",
-               server_alt=args.server_alt or "", proxy=args.proxy or "")
+               server_alt=args.server_alt or "", proxy=args.proxy or "",
+               net_wait_minutes=int(getattr(args, "net_wait", 20) or 0))
     # ---- 本机自主采集模式（不领协作活，采完就退）----
     _tids = [int(x) for x in (args.tids or "").replace("，", ",").split(",")
              if str(x).strip().isdigit()]
@@ -542,6 +543,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="连续多少次联系不上控制面判定为失联（0=用默认 4；"
                          "失败后至少等 30 秒再试）")
     sp.add_argument("--quiet", action="store_true", help="不打印过程")
+    sp.add_argument("--net-wait", type=int, default=20,
+                    help="网络不通时等多久再放弃（分钟，默认 20；0=不等直接退出）。"
+                         "等待期间程序不退出，网络恢复后自动接上")
     # ---- 本机自主采集（2026-10-23 新增）----
     #   成员要在**自己机器**上采指定的部门/帖子，采完回传服务器。
     #   ★ 为什么必须走本机：站方不提供 CORS，浏览器不能直采；

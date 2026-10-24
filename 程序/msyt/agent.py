@@ -134,13 +134,27 @@ SUBMIT_FAIL_LIMIT = 4
 PROBE_TIMEOUT = 20
 
 
+def _looks_reachable(r) -> bool:
+    """这个 HTTP 响应算不算「**控制面可达**」。
+
+    ★ 为什么不能「有响应就算通」（2026-10-24 修）：
+      代理连不上源站时，**代理自己**会回一个 502/504 的 HTML 错误页。
+      旧实现只看「有没有收到响应」→ 把代理的错误页当成「可达」
+      → agent 一头撞进死路还自以为通了。
+      判定规则见 netdiag.looks_reachable。
+    """
+    from . import netdiag
+    return netdiag.looks_reachable(r)
+
+
 class Agent:
     def __init__(self, server: str, email: str = "", password: str = "",
                  node: str = "", limit: int = 0, interval: float = 4.0,
                  task: str = "", verbose: bool = True,
                  heartbeat: float = 12.0, fail_limit: int = 0,
                  token: str = "", ticket: str = "",
-                 server_alt: str = "", proxy: str = ""):
+                 server_alt: str = "", proxy: str = "",
+                 net_wait_minutes: int = 20):
         self.server = server.rstrip("/")
         #: ★ 备用控制面地址（2026-10-23 加）：
         #:   启动包由「**本地浏览器 + 服务器**」协同生成（见 bundle.py），
@@ -150,6 +164,10 @@ class Agent:
         #: ★ 手动指定的代理（""= 自动读系统代理，None=已试过且没有）
         self.proxy = proxy.strip() if proxy else ""
         self._proxy: Optional[str] = None if proxy else None
+        #: 网络不通时等多久再放弃（分钟，0 = 不等，直接退出）。
+        #: 2026-10-24 加：组员网络断掉后 agent 直接死掉，他换了网络还得重开一遍。
+        #: 现在它会留在原地等网络恢复，恢复后自己接上。
+        self.net_wait_minutes = max(0, int(net_wait_minutes))
         self.email = email.strip().lower()
         self.password = password
         self.node = node or ""
@@ -227,18 +245,25 @@ class Agent:
         """
         if self._proxy is not None:
             return self._proxy
-        try:
-            import urllib.request
-            proxies = urllib.request.getproxies()
-        except Exception:                             # noqa: BLE001
-            proxies = {}
-        cand = ""
-        for k in ("https", "http", "all"):
-            if proxies.get(k):
-                cand = str(proxies[k])
-                break
+        from . import netdiag
+        cand = netdiag.sys_proxy()
         self._proxy = cand
         return cand
+
+    def _local_proxies(self) -> List[str]:
+        """扫**常见本地代理端口**，返回正在监听的那些。
+
+        ★ 为什么必须扫端口（2026-10-24 组员实测）：
+          组员的现象是「Edge 能打开网站、Python 连不上」，而系统代理**是空的**。
+          原因很常见：代理软件在跑，但**「系统代理」开关没开**
+          （只代理浏览器，或者用 PAC / 扩展接管）→ 注册表里查不到。
+          但 127.0.0.1 上的代理端口**确实在监听** → 扫端口就能找到它。
+        """
+        from . import netdiag
+        try:
+            return netdiag.local_proxy_candidates()
+        except Exception:                             # noqa: BLE001
+            return []
 
     def _mk_session(self, proxy: str = ""):
         """建一个 requests.Session（可指定代理）。"""
@@ -253,9 +278,9 @@ class Agent:
         """探一次控制面；通就返回 True（401/403 也算通）。"""
         sess = self._mk_session(proxy)
         try:
-            sess.get(base + "/api/agent/me", timeout=PROBE_TIMEOUT,
-                     headers={"User-Agent": "msyt-agent/1.1"})
-            return True
+            r = sess.get(base + "/api/agent/me", timeout=PROBE_TIMEOUT,
+                         headers={"User-Agent": "msyt-agent/1.1"})
+            return _looks_reachable(r)
         except Exception:                             # noqa: BLE001
             return False
 
@@ -350,6 +375,11 @@ class Agent:
             try:
                 r = requests.get(base + "/api/agent/me", timeout=PROBE_TIMEOUT,
                                  headers={"User-Agent": "msyt-agent/1.1"})
+                if not _looks_reachable(r):
+                    # ★ 5xx 多半是**网关/代理的错误页**，不是源站 → 不算通
+                    self.log(f"  ✗ {base} 不通（HTTP {r.status_code}，"
+                             "像是网关/代理的错误页）")
+                    continue
                 # 401/403 也算「通」—— 那是「没带令牌」，不是「到不了」
                 self.log(f"  ✓ {base} 可达（HTTP {r.status_code}）")
                 if i > 0:
@@ -378,10 +408,92 @@ class Agent:
             self.log("  ⚠ 没检测到系统代理（Edge 可能用了别的通道，"
                      "或你的网络需要手动指定代理）")
 
-        # 都探不通：还是用主地址（后面有失联退避重试兜底）
+        # ★ 再试**常见本地代理端口**（2026-10-24 组员实测）
+        #   组员的现象：系统代理是空的，但 Edge 能开网站 → 代理软件在跑、
+        #   只是没开「系统代理」开关 → 只能靠**扫端口**找到它。
+        locals_ = self._local_proxies()
+        if locals_:
+            self.log(f"  ⚠ 但本机有代理端口在监听：{', '.join(locals_)} —— 逐个试")
+            for px in locals_:
+                for i, base in enumerate(cands):
+                    if self._probe(base, px):
+                        self.log(f"  ✓ 经 {px} 可达：{base}")
+                        if i > 0:
+                            self.log(f"  → 改用备用地址：{base}")
+                        self.server = base
+                        self.proxy = px
+                        self._session = self._mk_session(px)
+                        return self.server
+                self.log(f"  ✗ 经 {px} 也不通")
+        else:
+            self.log("  ⚠ 本机也没发现常见代理端口（7890/7897/10809…）在监听")
+
+        # ★ IPv6 回落（2026-10-24）
+        #   有些国内宽带：IPv6 **握手能成**但传输被重置（RST）→ 强制 IPv4 就通。
+        from . import netdiag
+        try:
+            import socket
+            import urllib.parse
+            _u = urllib.parse.urlparse(self.server)
+            _host = _u.hostname or ""
+            _port = _u.port or (443 if _u.scheme == "https" else 80)
+            v6_ok, _ = netdiag.tcp_ok(_host, _port, socket.AF_INET6, timeout=5)
+            v4_ok, _ = netdiag.tcp_ok(_host, _port, socket.AF_INET, timeout=5)
+            if v6_ok and v4_ok:
+                self.log("  ⚠ IPv4/IPv6 握手都能成 → 试试强制走 IPv4"
+                         "（有些网络的 IPv6 能握手却传不了数据）")
+                netdiag.set_ipv4_only(True)
+                for i, base in enumerate(cands):
+                    if self._probe(base):
+                        self.log(f"  ✓ 强制 IPv4 后可达：{base}")
+                        if i > 0:
+                            self.log(f"  → 改用备用地址：{base}")
+                        self.server = base
+                        self.proxy = ""
+                        self._session = self._mk_session("")
+                        return self.server
+                netdiag.set_ipv4_only(False)
+                self.log("  ✗ 强制 IPv4 也不行")
+        except Exception:                             # noqa: BLE001
+            netdiag.set_ipv4_only(False)
+
+        # 都探不通：**分类**告诉他到底卡在哪一环（别再笼统说「网络抖动」）
+        self._report_network_dead_end(cands)
+        # 还是用主地址（后面有失联退避重试兜底）
         self.log(f"  ⚠ 所有候选地址都探不通，先用主地址 {self.server}"
                  f"（稍后会按退避重试）")
         return self.server
+
+    def _report_network_dead_end(self, cands: List[str]) -> None:
+        """全探不通时，给**可执行的**结论（组员最需要的就是这段）。"""
+        from . import netdiag
+        self.log("")
+        self.log("  ══ 连不上控制面 —— 下面是**能照着做**的排查 ══")
+        # 最后一次错误的分类
+        kind, advice = "未知原因", ""
+        for base in cands:
+            try:
+                import requests
+                requests.get(base + "/api/agent/me", timeout=8,
+                             headers={"User-Agent": "msyt-agent/1.1"})
+            except Exception as e:                     # noqa: BLE001
+                kind, advice = netdiag.classify_error(e)
+                break
+        self.log(f"  原因分类：**{kind}**")
+        if advice:
+            self.log(f"  {advice}")
+        self.log("")
+        self.log("  请按顺序试：")
+        self.log("   ① 双击包里的「自检.cmd」—— 它会逐项测 DNS/TCP/直连/代理，")
+        self.log("      并直接给出结论（这是最快定位的一步）。")
+        self.log("   ② 如果你开着代理软件（Clash / v2rayN / 各类加速器）：")
+        self.log("      - 打开它的「系统代理」开关，再重跑本程序；或")
+        self.log("      - 手动指定端口，例如 Clash 一般是 7890：")
+        self.log(f"        启动采集.cmd 里加一行参数：--proxy http://127.0.0.1:7890")
+        self.log("   ③ 换网络试一下（手机热点最省事）。")
+        self.log("   ④ 公司/校园网可能限制境外域名 —— 这种情况需要走代理。")
+        self.log("  ※ 你的账号和启动凭证都没问题，不用重新下载包。")
+        self.log("")
 
     # ---------------------------------------------------------------- HTTP
     def _req(self, method: str, path: str, body: Optional[dict] = None,
@@ -702,7 +814,69 @@ class Agent:
                 self.log(f"登录暂时失败（{e}），{wait} 秒后重试"
                          f"（{i + 1}/{tries}）")
                 time.sleep(wait)
+
+        # ★ 还登不上 → 如果是**连不上**（而不是服务端拒绝），别急着死。
+        #   2026-10-24 组员实测：网络被掐断后 agent 重试 3 次就退出，
+        #   他换了网络还得从头再来一遍 —— 白折腾。
+        #   现在改成「留在原地等网络恢复」，恢复后自己接上。
+        if self._is_connection_failure(last):
+            self.log("")
+            self.log("  ⚠ 连续重试仍连不上控制面（不是账号/凭证问题）")
+            if self.net_wait_minutes > 0 and self._wait_for_network():
+                for i in range(max(1, tries)):
+                    try:
+                        return self._req("POST", "/api/agent/login",
+                                         {"email": self.email,
+                                          "password": self.password},
+                                         auth=False)
+                    except LinkLost as e:
+                        last = e
+                        wait = RETRY_BACKOFF[min(i, len(RETRY_BACKOFF) - 1)]
+                        self.log(f"登录暂时失败（{e}），{wait} 秒后重试"
+                                 f"（{i + 1}/{tries}）")
+                        time.sleep(wait)
         raise LinkLost(str(last) if last else "登录失败")
+
+    def _is_connection_failure(self, exc: Optional[BaseException]) -> bool:
+        """判断这个失败是不是「**连不上**」（而不是服务端明确拒绝）。"""
+        if exc is None:
+            return False
+        msg = str(exc)
+        return any(k in msg for k in ("连接失败", "ConnectionError",
+                                      "Connection aborted", "timed out",
+                                      "Max retries", "Name or service"))
+
+    def _wait_for_network(self, interval: int = 60) -> bool:
+        """**等网络恢复**（2026-10-24 加）。
+
+        ★ 为什么要有这个：
+          组员的网络是「时通时不通」（校园网/代理不稳）。
+          agent 之前一断线就退出 → 组员得盯着窗口重开。
+          现在它留在原地等：每 60 秒探一次控制面，
+          通了就自动继续（组员该去开会就开会，回来它已经在采了）。
+        """
+        minutes = self.net_wait_minutes
+        self.log("  ══ 网络不通，程序**不会退出**，在这里等 ══")
+        self.log(f"     每 {interval} 秒探一次，最多等 {minutes} 分钟；"
+                 "Ctrl+C 可随时退出。")
+        self.log("     （账号和启动凭证都没问题，不用重新下载包）")
+        deadline = time.time() + minutes * 60
+        while time.time() < deadline:
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                self.log("  → 已取消等待")
+                return False
+            cands = [s for s in (self.server, self.server_alt) if s]
+            for base in cands:
+                if self._probe(base):
+                    self.log(f"  ✓ 网络恢复了：{base}")
+                    self.pick_server()
+                    return True
+            left = int(max(0, deadline - time.time()))
+            self.log(f"  … 仍未恢复（还剩 {left // 60} 分 {left % 60} 秒）")
+        self.log("  ⚠ 等太久了，退出。网络恢复后重新双击「启动采集.cmd」即可。")
+        return False
 
     def _log_login(self, how: str) -> None:
         """打印登录结果。
