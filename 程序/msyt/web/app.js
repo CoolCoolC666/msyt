@@ -239,14 +239,26 @@ async function loadOverview() {
 }
 
 /* ------------------------------------------------------------------ 字典 */
+const GROUP_CN = {
+  func: '职能部门和群团组织',
+  district: '区（县、市）及开发园区',
+  enterprise: '民生企事业单位',
+  other: '其他',
+};
+
 async function loadMeta() {
   const m = await api('/api/meta');
   state.meta = m;
   const fill = (sel, items, label) => {
     const el = $(sel);
     if (!el) return;
+    // ★ 每个 option 带上 **拼音首字母**与**分组**：
+    //   「可输入筛选」要用它们（输入名称/拼音/首字母都能命中）。
     el.innerHTML = `<option value="">${label}</option>` +
-      items.map(x => `<option value="${esc(x.code ?? x.typeid)}">${esc(x.name)}</option>`).join('');
+      items.map(x => `<option value="${esc(x.code ?? x.typeid)}"`
+        + ` data-py="${esc(x.py || '')}"`
+        + ` data-group="${esc(x.group || (x.group_name || '').split(',')[0] || '')}"`
+        + `>${esc(x.name)}</option>`).join('');
   };
   fill('#f-category', m.categories, '全部类别');
   fill('#f-state', m.states, '全部状态');
@@ -255,8 +267,122 @@ async function loadMeta() {
   fill('#f-group', m.groups, '全部分组');
   fill('#f-district', m.districts, '全部区县市');
   fill('#f-dept', m.depts, '全部部门');
+  // ★ 把这几个下拉框变成「**可输入筛选**」的（2026-10-24 用户要求：
+  //   109 个部门用原生下拉框没法找；站方那个搜索框支持「名称、拼音或首字母」）。
+  [['#f-category', '类别'], ['#f-state', '受理状态'], ['#f-mailbox', '留言箱'],
+   ['#f-light', '时效灯'], ['#f-group', '分组'], ['#f-district', '区县市'],
+   ['#f-dept', '部门']].forEach(([sel, ph]) => makeSearchable(sel, ph));
   initDeptDict();          // 部门字典：两个选择器共用
   pickers.forEach(renderPicker);
+}
+
+/* ------------------------------------------------------------------ 可输入的下拉框
+   ★ 为什么要自己写（2026-10-24 用户要求：「可以输入文字的形式」「其他标签同理」）
+     原生 <select> 不能输入 → 109 个部门、10 个区县市只能靠鼠标滚，
+     站方那个「107家部门与企事业单位在线」的搜索框支持
+     **「输入部门名称、拼音或首字母」** → 我们同款。
+
+   ★ 做法：保留原 <select>（**值仍从它取**，所以 filters() 一行都不用改），
+     外面套一层 input + 浮层列表；输入即过滤。
+*/
+function makeSearchable(sel, placeholder) {
+  const el = $(sel);
+  if (!el || el.dataset.sdrop) return;
+  el.dataset.sdrop = '1';
+  const wrap = document.createElement('span');
+  wrap.className = 'sdrop';
+  el.parentNode.insertBefore(wrap, el);
+  wrap.appendChild(el);
+  el.classList.add('sdrop-native');
+
+  const input = document.createElement('input');
+  input.className = 'sdrop-in';
+  input.type = 'text';
+  input.autocomplete = 'off';
+  input.placeholder = placeholder || (el.options[0] ? el.options[0].textContent : '筛选');
+  const list = document.createElement('div');
+  list.className = 'sdrop-list';
+  list.hidden = true;
+  wrap.appendChild(input);
+  wrap.appendChild(list);
+
+  const items = () => Array.from(el.options).map((o, i) => ({
+    i, value: o.value, label: o.textContent,
+    py: (o.dataset.py || ''), group: (o.dataset.group || ''),
+  }));
+
+  const match = (q, it) => {
+    const s = (q || '').trim().toLowerCase();
+    if (!s) return true;
+    if (it.label.toLowerCase().includes(s)) return true;      // 名称子串
+    if (it.py && it.py.toLowerCase().includes(s)) return true; // 拼音/首字母
+    if (it.value && it.value.includes(s)) return true;        // typeid
+    return false;
+  };
+
+  const render = (q) => {
+    const its = items().filter(it => match(q, it));
+    if (!its.length) {
+      list.innerHTML = '<div class="sdrop-none">没有匹配项</div>';
+      return;
+    }
+    let html = '', lastG = null;
+    for (const it of its) {
+      if (it.group && it.group !== lastG) {
+        html += `<div class="sdrop-g">${esc(GROUP_CN[it.group] || it.group)}</div>`;
+        lastG = it.group;
+      }
+      html += `<div class="sdrop-i" data-i="${it.i}">${esc(it.label)}</div>`;
+    }
+    list.innerHTML = html;
+  };
+
+  const open = () => {
+    render(input.value);
+    list.hidden = false;
+    wrap.classList.add('open');
+  };
+  const close = () => { list.hidden = true; wrap.classList.remove('open'); };
+
+  const pick = (idx) => {
+    const o = el.options[idx];
+    if (!o) return;
+    el.selectedIndex = idx;
+    input.value = o.value ? o.textContent : '';
+    close();
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  input.addEventListener('focus', open);
+  input.addEventListener('click', open);
+  input.addEventListener('input', () => { render(input.value); list.hidden = false; });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { close(); input.blur(); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const first = list.querySelector('.sdrop-i');
+      if (first) pick(Number(first.dataset.i));
+    }
+  });
+  list.addEventListener('mousedown', (e) => {
+    const it = e.target.closest('.sdrop-i');
+    if (!it) return;
+    e.preventDefault();               // 别让 input 失焦把列表关掉
+    pick(Number(it.dataset.i));
+  });
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) close();
+  });
+  // 点 input 时把当前选中的显示出来
+  const sync = () => {
+    const o = el.options[el.selectedIndex];
+    input.value = (o && o.value) ? o.textContent : '';
+  };
+  sync();
+  el.addEventListener('change', sync);
+  // 外部改了 select（比如「重置」），同步显示
+  const origReset = $('#btn-reset');
+  if (origReset) origReset.addEventListener('click', () => setTimeout(sync, 0));
 }
 
 /* ------------------------------------------------------------------ 检索 */

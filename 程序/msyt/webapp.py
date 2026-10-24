@@ -512,24 +512,42 @@ def api_meta(request: Request) -> Dict[str, Any]:
     _require_member(request)
     cfg = _cfg()
     db = get_db(cfg)
-    depts = [dict(r) for r in db.conn.execute(
-        "SELECT typeid,name,group_code,group_name,is_district FROM depts "
-        "ORDER BY group_name, name")]
-    districts = [dict(r) for r in db.conn.execute(
-        "SELECT typeid,name,total_msgs,last_month_msgs FROM districts ORDER BY name")]
+    from . import pinyin as _py
+    # ★ 部门/区县市：带上**拼音首字母**与**分组**（2026-10-24）
+    #   「输入名称、拼音或首字母」—— 站方那个「107家部门与企事业单位在线」
+    #   的搜索框就是这个能力，109 个部门用原生下拉框根本没法找。
+    depts = []
+    for r in db.conn.execute(
+            "SELECT typeid,name,group_code,group_name,is_district,py_initials "
+            "FROM depts ORDER BY group_name, name"):
+        d = dict(r)
+        d["py"] = d.get("py_initials") or _py.initials(d.get("name") or "")
+        d["group"] = d.get("group_name") or ""
+        depts.append(d)
+    districts = []
+    for r in db.conn.execute(
+            "SELECT typeid,name,total_msgs,last_month_msgs,py_initials "
+            "FROM districts ORDER BY name"):
+        d = dict(r)
+        d["py"] = d.get("py_initials") or _py.initials(d.get("name") or "")
+        d["group"] = "district"
+        districts.append(d)
     return {
-        "categories": CATEGORIES,
-        "states": STATES,
-        "mailboxes": MAILBOXES,
-        "lights": LIGHTS,
+        "categories": _py.dict_items(CATEGORIES),
+        "states": _py.dict_items(STATES),
+        "mailboxes": _py.dict_items(MAILBOXES),
+        "lights": _py.dict_items(LIGHTS),
         "depts": depts,
         "districts": districts,
         "groups": [
             # 用站方 tab 的原名，不要自造简称 —— 报告与界面口径一致
-            {"code": "func", "name": "职能部门和群团组织", "short": "职能"},
-            {"code": "district", "name": "区（县、市）及开发园区", "short": "区县市"},
-            {"code": "enterprise", "name": "民生企事业单位", "short": "民生企事业"},
-            {"code": "other", "name": "其他", "short": "其他"},
+            {"code": "func", "name": "职能部门和群团组织", "short": "职能",
+             "py": "BMDWQTTZZ"},
+            {"code": "district", "name": "区（县、市）及开发园区", "short": "区县市",
+             "py": "QXSJSJKFQQ"},
+            {"code": "enterprise", "name": "民生企事业单位", "short": "民生企事业",
+             "py": "MSQYDW"},
+            {"code": "other", "name": "其他", "short": "其他", "py": "QT"},
         ],
     }
 

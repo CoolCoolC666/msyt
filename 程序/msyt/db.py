@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS depts (
     group_name TEXT,
     is_district INTEGER DEFAULT 0,
     url        TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    py_initials TEXT
 );
 
 CREATE TABLE IF NOT EXISTS districts (
@@ -173,7 +174,8 @@ CREATE TABLE IF NOT EXISTS districts (
     last_month_accepted INTEGER,
     total_msgs         INTEGER,
     total_accepted     INTEGER,
-    updated_at TEXT
+    updated_at TEXT,
+    py_initials TEXT
 );
 
 CREATE TABLE IF NOT EXISTS site_stats (
@@ -519,6 +521,13 @@ class DB:
                 #   0 = 一次性票据（网页签发，防泄露后被复用）
                 #   1 = 包用长期凭证（30 天，可重复）
                 "repeatable": "INTEGER DEFAULT 0",
+            },
+            "depts": {
+                # ★ 拼音首字母（2026-10-24）：支持「输入名称、拼音或首字母」检索
+                "py_initials": "TEXT",
+            },
+            "districts": {
+                "py_initials": "TEXT",
             },
         }
         for table, cols in wanted.items():
@@ -1187,25 +1196,36 @@ class DB:
     # ---------------------------------------------------------------- 词典
     def save_depts(self, depts: List[Dict]) -> None:
         now = time.strftime("%Y-%m-%d %H:%M:%S")
+        # ★ 顺带存拼音首字母（2026-10-24）：支持「输入名称、拼音或首字母」检索
+        try:
+            from .pinyin import initials as _pyi
+        except Exception:                               # noqa: BLE001
+            _pyi = lambda s: ""                          # type: ignore
         with self.lock:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO depts(typeid,name,group_code,group_name,"
-                "is_district,url,updated_at) VALUES(?,?,?,?,?,?,?)",
+                "is_district,url,updated_at,py_initials) VALUES(?,?,?,?,?,?,?,?)",
                 [(d["typeid"], d["name"], d.get("group_code", ""),
                   d.get("group_name", ""), d.get("is_district", 0),
-                  d.get("url", ""), now) for d in depts])
+                  d.get("url", ""), now, _pyi(d.get("name", "")))
+                 for d in depts])
             self.conn.commit()
 
     def save_districts(self, districts: List[Dict]) -> None:
         now = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            from .pinyin import initials as _pyi
+        except Exception:                               # noqa: BLE001
+            _pyi = lambda s: ""                          # type: ignore
         with self.lock:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO districts(typeid,name,last_month_msgs,"
-                "last_month_accepted,total_msgs,total_accepted,updated_at) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "last_month_accepted,total_msgs,total_accepted,updated_at,"
+                "py_initials) VALUES(?,?,?,?,?,?,?,?)",
                 [(d["typeid"], d.get("name", ""), d.get("last_month_msgs"),
                   d.get("last_month_accepted"), d.get("total_msgs"),
-                  d.get("total_accepted"), now) for d in districts])
+                  d.get("total_accepted"), now, _pyi(d.get("name", "")))
+                 for d in districts])
             self.conn.commit()
 
     def save_site_stats(self, stats: Dict, raw: str = "") -> None:
@@ -1288,11 +1308,18 @@ class DB:
         if dept:
             ids = multi(dept)
             if ids:
-                ph = ",".join("?" * len(ids))
-                where.append(f"(t.dept_id IN ({ph}) OR "
-                             f"(','||COALESCE(t.extra_dept_ids,'')||',') LIKE "
-                             f"'%{','.join(ids)}%')")
-                args += [",".join(ids)] + [f"%,{i},%" for i in ids]
+                # ★ 这里原来写错了（2026-10-24 修）：
+                #   旧写法 IN (?,?) 却只给了 1 个参数（把 "556,737" 当一个值绑进去）
+                #   → 占位符与参数个数对不上 → sqlite 抛错 → 接口 500
+                #   → 页面上表现为「检索失败：」（连错误信息都是空的）。
+                # 一条帖可能带**多个部门**（dept_id + extra_dept_ids 逗号分隔），
+                # 所以每个 id 要判两次：主部门是它，或副部门里含它。
+                parts = []
+                for i in ids:
+                    parts.append("(t.dept_id = ? OR "
+                                 "(','||COALESCE(t.extra_dept_ids,'')||',') LIKE ?)")
+                    args += [i, f"%,{i},%"]
+                where.append("(" + " OR ".join(parts) + ")")
         if group:
             # dept_group 存的是逗号连接的分组集合（一个部门可能属于多个分组），
             # 所以要用「成员判定」而不是等值判定。

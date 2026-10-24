@@ -252,6 +252,30 @@ td .sub2 { color: var(--dim); font-size: 11.5px; }
 }
 .fchip:hover { background: #d8efec; }
 
+/* ---------------------------------------------------------------- 可输入的下拉框
+   （2026-10-24：109 个部门用原生 select 没法找 → 改成能打字的 combobox） */
+.sdrop { position: relative; display: inline-block; }
+.sdrop-in {
+  font: inherit; font-size: 12.5px; color: var(--ink);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; min-width: 132px; max-width: 260px; height: 34px;
+}
+.sdrop-in:focus { outline: none; border-color: var(--accent); }
+.sdrop-native { position: absolute; left: -9999px; width: 0; height: 0; }
+.sdrop-list {
+  position: absolute; z-index: 60; top: calc(100% + 4px); left: 0;
+  min-width: 230px; max-width: 340px; max-height: 340px; overflow: auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(16,24,40,.14); padding: 4px 0;
+}
+.sdrop-i { padding: 6px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap; }
+.sdrop-i:hover { background: var(--accent-soft); }
+.sdrop-g {
+  padding: 6px 12px 3px; font-size: 11px; color: var(--dim);
+  background: #f7f9fa; border-bottom: 1px solid var(--line); margin-top: 3px;
+}
+.sdrop-none { padding: 8px 12px; font-size: 12.5px; color: var(--dim); }
+
 /* ---------------------------------------------------------------- 分页 */
 .pager { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .pager span { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
