@@ -228,6 +228,7 @@
           <button class="primary" id="btn-list">开始采集</button>
         </div>
         <div class="hint" id="dp-estimate"></div>
+        <div class="hint" id="j-msg"></div>
 
         <details class="adv">
           <summary>高级：直接写源描述（可与上面的选择叠加）</summary>
@@ -271,6 +272,7 @@
           <button class="primary" id="btn-detail">开始采集</button>
         </div>
         <div class="hint" id="dd-estimate"></div>
+        <div class="hint" id="dd-msg"></div>
       </div>
 
       <div class="card">
@@ -282,6 +284,17 @@
         </div>
         <div id="export-msg" class="hint"></div>
       </div>
+    </div>
+
+    <!-- ---------- 本机 agent（成员的采集就发生在这里）---------- -->
+    <div class="card" id="local-agent-card">
+      <h3>本机 agent（在你自己的电脑上采集）</h3>
+      <p class="hint">你点「开始采集」后，采集就发生在**你这台电脑**上
+        （站方不提供 CORS，浏览器不能直接采；而在服务器上采，站方看到的
+        流量就全来自管理员那一个 IP，协作采集也就没了意义）。<br>
+        下面是这个 agent 的**实时日志**与进度 —— 采到的东西会直接回传服务器。</p>
+      <div id="local-agent-state" class="hint">正在探测本机 Agent…</div>
+      <div id="local-agent-log" class="logbox"><p class="hint">还没启动本机 agent。</p></div>
     </div>
 
     <div class="card">

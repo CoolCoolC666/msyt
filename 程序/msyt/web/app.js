@@ -801,50 +801,114 @@ function isMemberView() {
 }
 
 /** 把一次采集转交给本机 agent（经由本地助手 127.0.0.1:8766）。 */
-async function startLocalCollect(payload, label) {
+async function startLocalCollect(payload, label, msgEl) {
+  // ★ 提示要写在**按钮旁边**（msgEl），不能只写在上面那张「成员端工具」卡里 ——
+  //   成员是盯着自己点的那个按钮找反馈的，提示跑到别处就等于「没反应」
+  //   （用户 2026-10-24 实测反馈）。
+  const say = (txt, bad) => {
+    if (msgEl) {
+      // ★ 强调用 ‹› 包起来（和 helperMsg 一个约定）：直接写 ** 会被 esc 掉成字面星号
+      const html = esc(txt).replace(/‹([^›]*)›/g, '<b>$1</b>');
+      msgEl.innerHTML = bad ? `<span style="color:#b42318">${html}</span>` : html;
+    }
+    helperMsg(txt, bad);
+  };
   // ★ 先探一下助手在不在（2026-10-23 加）：
   //   组员最容易犯的错就是「没起 Agent 就点开始采集」。
   //   直接发 /start 会得到一个含糊的失败；先探一次可以把话说清楚。
+  let st = null;
   try {
-    const st = await helperCall('/status');
-    if (!st || !st.ok) {
-      helperMsg('本机助手没响应 —— ‹请先起 Agent›', true);
-      toast('还没起 Agent：先点上面的「下载成员端启动包」，'
-        + '解压后双击「启动助手.cmd」，再点「启动本机 agent」', true);
-      setAgentFirstState(null);
-      return;
-    }
-    if (!st.running) {
-      helperMsg('助手在，但本机 Agent 没在跑 —— ‹请先点「启动本机 agent」›', true);
-      toast('助手已在运行，但还没起 Agent —— 点上面的「启动本机 agent」', true);
-      setAgentFirstState(st);
-      return;
-    }
+    st = await helperCall('/status');
   } catch (e) {
-    helperMsg('没检测到本机助手 —— ‹请先起 Agent›', true);
-    toast('还没起 Agent：先双击包里的「启动助手.cmd」；若助手窗口**已经在跑**却仍提示没检测到，多半是 Edge 拦了「本地网络访问」——点地址栏**左侧**那个图标 → 选「允许此网站访问你的本地网络」；还不行就双击包里的「自检.cmd」，它会直接告诉你哪一环不通', true);
+    const found = await probeOtherPorts();
+    if (found) {
+      say('端口对不上：' + helperPortMismatchText(found), true);
+    } else {
+      say('没检测到本机助手 —— ‹请先起 Agent›', true);
+      toast('还没起 Agent：先双击包里的「启动助手.cmd」；若助手窗口**已经在跑**却仍提示没检测到，多半是 Edge 拦了「本地网络访问」——点地址栏**左侧**那个图标 → 选「允许此网站访问你的本地网络」；还不行就双击包里的「自检.cmd」，它会直接告诉你哪一环不通', true);
+    }
     setAgentFirstState(null);
     return;
   }
-  helperMsg(`正在呼叫本机 agent（${label}）…`);
+  if (!st || !st.ok) {
+    say('本机助手没响应 —— ‹请先起 Agent›', true);
+    toast('还没起 Agent：先点上面的「下载成员端启动包」，'
+      + '解压后双击「启动助手.cmd」，再点「启动本机 agent」', true);
+    setAgentFirstState(null);
+    return;
+  }
+  // ★ 助手在就行 —— **agent 没跑也直接把它起起来**（2026-10-24 用户要求：
+  //   「组员点开始采集没有反应，这个应当在组员的 Agent 运行并且传输日志」）。
+  //   网页把当前 JWT 递过去，助手用 `--token` 起 agent →
+  //   成员**不用再手动点一次「启动本机 agent」**，也不用输密码。
+  say(`正在在你自己的电脑上启动 agent（${label}）…`);
   try {
     const r = await helperCall('/start',
       Object.assign({ token: state.token }, payload));
     if (r && r.ok) {
-      helperMsg(r.already
-        ? '本机 agent 已经在跑了（先停掉再换目标）'
-        : `本机 agent 已开始${label}`);
-      toast(`已在本机启动${label}`);
+      say(r.already
+        ? '本机 agent 已经在跑了（要换目标得先停掉它）'
+        : `已在‹你电脑›上开始${label} —— 日志与进度在下面「本机 agent」里`,
+        false);
+      toast(`已在你电脑上启动${label}`);
       pollHelper();
+      if (!r.already) watchLocalStart(label, say);   // 已经在跑就别盯了
     } else {
-      helperMsg((r && r.error) || '助手拒绝了', true);
+      say((r && r.error) || '助手拒绝了', true);
     }
   } catch (e) {
-    // ★ 助手没起：明确告诉组员**先起 Agent**，别只说一句「没检测到」
-    //   （用户 2026-10-23：「组员网站运行这个记得请组员先起Agent」）
-    helperMsg('没检测到本机助手 —— ‹请先起 Agent›', true);
+    const found = await probeOtherPorts();
+    if (found) {
+      say('端口对不上：' + helperPortMismatchText(found), true);
+      return;
+    }
+    say('没检测到本机助手 —— ‹请先起 Agent›', true);
     toast('还没起 Agent：先双击包里的「启动助手.cmd」；若助手窗口**已经在跑**却仍提示没检测到，多半是 Edge 拦了「本地网络访问」——点地址栏**左侧**那个图标 → 选「允许此网站访问你的本地网络」；还不行就双击包里的「自检.cmd」，它会直接告诉你哪一环不通', true);
     setAgentFirstState(null);
+  }
+}
+
+/** 滚到「本机 agent」那块（成员的采集反馈应该在他眼前）。 */
+function scrollToLocalAgent() {
+  const el = $('#local-agent-card');
+  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/** 起完 agent 之后盯几秒。
+ *  ★ 为什么盯（2026-10-24 用户实测：「点了没反应」）：
+ *   agent **秒退**是最容易被误认为「没反应」的一种情况 ——
+ *   比如这个源服务端已经采完了，它起来一看没活可采，立刻退出。
+ *   成员只看到「窗口闪了一下就没了」，不知道它到底起来过没有。
+ *   这里盯 9 秒：还在跑 = 正常；退出来了 = 把日志里的原因翻译成人话。
+ */
+async function watchLocalStart(label, say) {
+  let said = false;
+  // ★ 要一直盯到 agent 退出为止（最多 60 秒）：
+  //   只在第一次检查就下结论 → agent 随后秒退，提示就永远停在「正在跑」，
+  //   反而比不提示更误导（成员会一直等）。
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    let s = null;
+    try { s = await helperCall('/status'); } catch (_) { return; }
+    if (!s) return;
+    if (s.running) {
+      if (!said) {
+        said = true;
+        say(`本机 agent 正在跑（${label}）—— 进度见下面「本机 agent」`, false);
+      }
+      continue;          // ★ 继续盯
+    }
+    // 退出了 → 把日志里的原因翻译成人话
+    const tail = (s.log || []).slice(-8).map(l => l.m || '').join(' ');
+    if (/已采完|没活可采|跳过|没有可采/.test(tail)) {
+      say(`本机 agent 起来了，但这个源‹服务端已经采完、没活可采› → `
+        + `换一个源，或者到「协作采集」领活（那边有活）`, false);
+    } else if (/失败|中断|错误|Traceback/.test(tail)) {
+      say(`本机 agent 起来了但‹中途出错› —— 详见下面「本机 agent」的日志`, false);
+    } else {
+      say(`本机 agent 已跑完（${label}）—— 详见下面「本机 agent」的日志`, false);
+    }
+    return;
   }
 }
 
@@ -881,7 +945,7 @@ $('#btn-list').onclick = () => {
     if (!spec) { toast('先选采集源（点「全选」或勾选部门）', true); return; }
     return startLocalCollect(
       { sources: spec, pages: Math.min(cap, 50) },
-      '列表采集');
+      '列表采集', $('#j-msg'));
   }
   startJob('/api/jobs/list', {
     sources: $('#j-sources').value.trim(),
@@ -912,7 +976,7 @@ $('#btn-detail').onclick = () => {
   //   走**协作采集**领活那条路（本机 agent 不自己挑活）。
   if (isMemberView()) {
     if (tids.length) {
-      return startLocalCollect({ tids: tids.join(',') }, '详情采集（定点补采）');
+      return startLocalCollect({ tids: tids.join(',') }, '详情采集（定点补采）', $('#dd-msg'));
     }
     if (deptIds.length) {
       toast('「按部门补齐」请用「协作采集」领活 —— 那里会按池子把活派给你', true);
@@ -959,7 +1023,14 @@ async function loadJobs() {
   const r = await api('/api/jobs');
   const items = r.items || [];
   if (!items.length) {
-    $('#job-list').innerHTML = '<div class="empty">还没有任务。上面挑一个开始。</div>';
+    // ★ 成员的采集**不在服务器上跑** → 这里对成员永远是空的，
+    //   得说清楚「你的采集在上面的本机 agent 里」，否则看着像什么都没发生
+    //   （用户 2026-10-24 实测反馈）。
+    $('#job-list').innerHTML = isMemberView()
+      ? '<div class="empty">服务器上还没有任务 —— 这本来就应该没有：'
+        + '<b>你的采集跑在自己电脑上的 agent 里</b>，'
+        + '点上面的「开始采集」就会自动起来，日志见上面「本机 agent」。</div>'
+      : '<div class="empty">还没有任务。上面挑一个开始。</div>';
     return;
   }
   $('#job-list').innerHTML = items.map(j => {
@@ -1376,6 +1447,9 @@ async function afterLogin() {
   //   管理员在服务器上采（服务器就是自己的机器），不需要这层提醒；
   //   成员必须在自己的电脑上起 agent，所以这张卡要摆在「采集作业」最前面。
   $('#agent-first-card').style.display = isAdmin ? 'none' : '';
+  // ★ 「本机 agent」那块**只给成员看**（管理员自己就是那台机器，
+  //   他的采集直接在服务器上跑 → 看「任务运行情况」就够了）。
+  $('#local-agent-card').style.display = isAdmin ? 'none' : '';
   $('#btn-list').title = isAdmin
     ? '在**这台机器**上采集（管理员端）'
     : '在**你自己的电脑**上采集（需要本机 agent）';
@@ -1852,6 +1926,30 @@ async function pollHelper() {
     box.innerHTML = head + (lines.length ? lines.join('\n')
       : '<span class="dim">（还没有日志）</span>');
     box.scrollTop = box.scrollHeight;
+    // ★ 同一份状态与日志**也**送到「本机 agent」那块（2026-10-24 用户要求：
+    //   「这个应当在组员的 Agent 运行并且传输日志」）。
+    //   成员是盯着自己点的那个按钮找反馈的 —— 日志只写在上面那张
+    //   「成员端工具」卡里，他看不见，就等于「没反应」。
+    const lbox = $('#local-agent-log');
+    if (lbox) {
+      lbox.innerHTML = head + (lines.length ? lines.join('\n')
+        : '<span class="dim">（还没有日志）</span>');
+      lbox.scrollTop = lbox.scrollHeight;
+    }
+    const lstate = $('#local-agent-state');
+    if (lstate) {
+      const lastLine = (r.log && r.log.length)
+        ? esc(r.log[r.log.length - 1].m || '') : '';
+      lstate.innerHTML = r.running
+        ? '状态：<b>运行中</b>（pid ' + r.pid + '）· 已领 ' + picked
+          + ' 帖 · 已完成 ' + done + ' 帖'
+          + (failed ? ' · 失败 ' + failed : '')
+          + (restricted ? ' · 站方限制 ' + restricted : '')
+        : '状态：<b>未运行</b>'
+          + (idle !== null ? '（最后活动 ' + ago(idle) + '）' : '')
+          + ' —— 点上面的「开始采集」，就会在你这台电脑上自动起来'
+          + (lastLine ? '<br>最后一条：' + lastLine : '');
+    }
     // ★ 同步「先起 Agent」引导卡上的状态徽章（2026-10-23 加）
     setAgentFirstState(r, picked, done);
   };
