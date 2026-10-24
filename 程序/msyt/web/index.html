@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>民生e点通 · 舆情采集器</title>
+<link rel="stylesheet" href="/static/style.css?v=__CSSV__">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">e</span>
+    <div>
+      <h1>民生e点通 · 天一论坛 · 群众留言板</h1>
+      <p class="sub">舆情采集器 <span class="dim">/</span> 只读采集 <span class="dim">/</span> 本地数据，不对站方做任何写操作</p>
+    </div>
+  </div>
+  <div class="topmeta">
+    <div class="chip" id="chip-db"><span class="dot" id="dot"></span><span id="dbtext">连接中…</span></div>
+    <div class="chip"><b id="m-threads">–</b><span class="dim">帖</span></div>
+    <div class="chip"><b id="m-posts">–</b><span class="dim">楼层</span></div>
+    <div class="chip"><b id="m-done">–</b><span class="dim">已采详情</span></div>
+    <div class="chip"><b id="m-pending">–</b><span class="dim">待采</span></div>
+    <button class="chip link hidden" id="btn-pw-top" title="修改自己的登录密码">改密码</button>
+    <button class="chip link hidden" id="btn-logout-top" title="退出登录">退出</button>
+    <a class="chip link" href="/docs" target="_blank">API 文档</a>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="active">总览</button>
+  <button data-tab="threads">检索与浏览</button>
+  <button data-tab="collect">采集与协作</button>
+  <button data-tab="integrity">完整性体检</button>
+  <button data-tab="log">采集日志</button>
+</nav>
+
+<main>
+
+<!-- ================= 总览 ================= -->
+<section class="panel" id="tab-overview">
+  <div class="cards" id="ov-cards"></div>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>帖子类别分布</h3>
+      <div id="ov-category" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>受理状态分布</h3>
+      <div id="ov-state" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>部门分组</h3>
+      <div id="ov-group" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>时效灯</h3>
+      <div id="ov-light" class="bars"></div>
+      <p class="hint">时效灯只对「已回复」的帖存在，空值记为未点亮。</p>
+    </div>
+    <div class="card">
+      <h3>区县市</h3>
+      <div id="ov-district" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>站方自报统计</h3>
+      <div id="ov-site" class="kv"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>列表采集源水位</h3>
+    <p class="hint">水位线 = 该源已采到的页。行数是累计口径；「最早」是这一批里最早一贴的时间。</p>
+    <div class="tablewrap"><table id="ov-wm"></table></div>
+  </div>
+</section>
+
+<!-- ================= 检索与浏览 ================= -->
+<section class="panel hidden" id="tab-threads">
+  <div class="card filters">
+    <div class="row">
+      <input id="f-q" type="search" placeholder="关键词：标题 / 楼层正文（<3 字自动退回 LIKE）" autocomplete="off">
+      <select id="f-scope" title="检索范围">
+        <option value="all">标题+正文</option>
+        <option value="thread">仅标题</option>
+        <option value="post">仅正文</option>
+      </select>
+      <select id="f-sort" title="排序">
+        <option value="time_desc">时间↓</option>
+        <option value="time_asc">时间↑</option>
+        <option value="replies_desc">回复数↓</option>
+        <option value="views_desc">浏览数↓</option>
+        <option value="dept">按部门</option>
+      </select>
+    </div>
+    <div class="row">
+      <select id="f-category" data-dict="categories"></select>
+      <select id="f-state" data-dict="states"></select>
+      <select id="f-group"></select>
+      <select id="f-district"></select>
+      <select id="f-dept"></select>
+      <select id="f-light" data-dict="lights"></select>
+      <input id="f-from" type="date" title="起始日期">
+      <input id="f-to" type="date" title="截止日期">
+      <button class="primary" id="btn-search">检索</button>
+      <button class="ghost" id="btn-reset">重置</button>
+    </div>
+    <div class="row resultinfo">
+      <span id="res-info">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="tablewrap tall"><table id="t-threads"></table></div>
+    <div class="pager">
+      <button class="ghost" id="pg-first">« 首页</button>
+      <button class="ghost" id="pg-prev">‹ 上一页</button>
+      <span id="pg-text">—</span>
+      <button class="ghost" id="pg-next">下一页 ›</button>
+      <button class="ghost" id="pg-last">末页 »</button>
+      <select id="pg-size">
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 采集与协作（合并页签） ================= -->
+<section class="panel hidden" id="tab-collect">
+
+  <div class="subtabs" id="collect-subtabs">
+    <button data-sub="jobs" class="active">采集作业</button>
+    <button data-sub="assist">协作采集</button>
+    <button data-sub="me">我的账号</button>
+  </div>
+
+  <!-- ---------- 子页：采集作业 ---------- -->
+  <div class="subpanel" id="sub-jobs">
+    <div class="card" id="agent-first-card">
+      <h3>⚠ 开始采集前，先在你自己的电脑上启动 Agent</h3>
+      <div class="warnbox">
+        <b>采集必须发生在你自己的电脑上</b>，不是在这台服务器上。
+        <ul style="margin:8px 0 0 18px">
+          <li>站方<b>不提供 CORS</b> —— 浏览器出于安全，不允许网页直接跨站抓站方，
+            所以「开始采集」这个按钮在你的浏览器里<b>采不到任何东西</b>。</li>
+          <li>如果采集跑在服务器上，站方看到的流量<b>全来自管理员那一个 IP</b>，
+            协作采集也就失去了「站方看到分散的普通用户」的意义。</li>
+          <li>本机 Agent 启动后，网页才能把它叫醒；采到的内容会<b>直接回传</b>到这台服务器。</li>
+        </ul>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <span class="hint" id="agent-first-state">正在探测本机 Agent…</span>
+      </div>
+      <ol style="margin:8px 0 0 18px">
+        <li>点下面的<b>「下载成员端启动包」</b>，解压到你自己电脑上。</li>
+        <li>双击包里的 <code>启动助手.cmd</code> —— 它会在你本机开一个 127.0.0.1:8766 的小助手
+          （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。</li>
+        <li>回到这个网页，点 <b>「启动本机 agent」</b>，输入邮箱和密码。</li>
+        <li>本机 Agent 变成「运行中」之后，再回来点「开始采集」。</li>
+      </ol>
+    </div>
+
+    <div class="card" id="toolkit-card">
+      <h3>成员端工具（在你自己的电脑上跑）</h3>
+      <p class="hint">你的电脑上没有装 msyt 这个包，所以直接敲 <code>python -m msyt agent …</code>
+        只会报 <code>No module named msyt</code>。解决办法：<b>从这个网页下载启动包</b> ——
+        包里已经写好了控制面地址（<b>跟着你此刻访问的网址走，是动态的</b>），
+        解压后双击 <code>启动采集.cmd</code>，装完依赖后<b>只问你要邮箱和密码</b>就能开跑。</p>
+      <div class="row">
+        <button class="primary" id="btn-bundle">下载成员端启动包</button>
+        <span class="hint" id="bundle-msg"></span>
+      </div>
+      <div class="row">
+        <button class="ghost" id="btn-helper-start">启动本机 agent</button>
+        <button class="ghost" id="btn-helper-stop">停止本机 agent</button>
+        <span class="hint" id="helper-msg"></span>
+      </div>
+      <p class="hint">「启动本机 agent」需要你先双击启动包里的 <code>启动助手.cmd</code>：
+        它会在本机开一个 127.0.0.1:8766 的小助手，网页才能呼叫它
+        （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。</p>
+      <div class="logbox" id="helper-log"><p class="hint">本机 agent 的实时日志（还没启动）</p></div>
+    </div>
+    <div class="grid2">
+      <div class="card card-wide">
+        <h3>② 列表采集（链路一）· 采集范围选择</h3>
+        <p class="hint">只拿元数据，<b>1 请求/页</b>。<b>每个部门是一条独立的分页列表</b>，各有各的断点，
+          部门视图可远深于全站视图（后者 500 页顶）。站方共 <b>109</b> 个部门与企事业单位。</p>
+
+        <div class="picker" id="picker-list">
+          <div class="picker-bar">
+            <input class="dp-search" type="search" placeholder="筛选部门（输入名称，如 公安 / 银行 / 海曙）" autocomplete="off">
+            <button class="tiny" data-pick="all">全选</button>
+            <button class="tiny" data-pick="none">清空</button>
+            <button class="tiny" data-pick="invert">反选</button>
+            <span class="dp-count"></span>
+          </div>
+          <div class="picker-list"></div>
+          <div class="picker-foot">
+            <label class="chk"><input type="checkbox" id="dp-global"> 同时采全站视图 global（500 页顶）</label>
+            <label class="chk"><input type="checkbox" id="j-taxonomy"> 先刷分类体系</label>
+            <label class="chk"><input type="checkbox" id="j-restart"> 从头重采（忽略断点）</label>
+          </div>
+        </div>
+
+        <div class="row">
+          <label class="lbl">每源最多</label>
+          <input id="j-pages" type="number" value="500" min="0" title="每源最多几页（0=不限，站方分页顶 500）">
+          <span class="dim">页</span>
+          <label class="lbl">每源采到</label>
+          <input id="j-stopafter" type="number" value="0" min="0" title="每源采到几页就停（0=不限制）">
+          <span class="dim">页就停</span>
+          <button class="primary" id="btn-list">开始采集</button>
+        </div>
+        <div class="hint" id="dp-estimate"></div>
+
+        <details class="adv">
+          <summary>高级：直接写源描述（可与上面的选择叠加）</summary>
+          <div class="row">
+            <input id="j-sources" placeholder="global / dept:495,972 / group:func / category:1 / dateline:2592000">
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
+        <h3>① 分类体系</h3>
+        <p class="hint">抓部门目录（109 个）、区县市（10 个）与站方统计脚本，并按新字典全量重算分组/区县市。</p>
+        <button class="primary" id="btn-taxonomy">开始抓取</button>
+      </div>
+
+      <div class="card card-wide">
+        <h3>③ 详情采集（链路二）</h3>
+        <p class="hint">拿正文，N×2 请求/帖。<b>先旧后新</b>；每页一个事务，中断可从断点续。</p>
+        <p class="hint">目标有两种给法，可<b>叠加</b>：
+          <b>直接填 tid</b>（定点补采），或<b>按部门选</b>（与列表采集
+          <b>同一个源</b>：选中的部门下所有还没采详情的帖会按先旧后新入队）。</p>
+
+        <div class="picker" id="picker-detail">
+          <div class="picker-bar">
+            <input class="dp-search" type="search" placeholder="按部门筛（输入名称，如 公安 / 银行 / 海曙）" autocomplete="off">
+            <button class="tiny" data-pick="copy">沿用列表的选择</button>
+            <button class="tiny" data-pick="all">全选</button>
+            <button class="tiny" data-pick="none">清空</button>
+            <button class="tiny" data-pick="invert">反选</button>
+            <span class="dp-count"></span>
+          </div>
+          <div class="picker-list"></div>
+        </div>
+
+        <div class="row">
+          <label class="lbl">直接指定 tid</label>
+          <input id="j-tid" placeholder="可多个，逗号分隔">
+          <label class="lbl">本次最多</label>
+          <input id="j-limit" type="number" value="0" min="0" title="本次最多几帖（0=不限）">
+          <label class="chk"><input type="checkbox" id="j-retry"> 重置失败任务为待采</label>
+          <button class="primary" id="btn-detail">开始采集</button>
+        </div>
+        <div class="hint" id="dd-estimate"></div>
+      </div>
+
+      <div class="card">
+        <h3>④ 导出</h3>
+        <p class="hint">导出全部帖子（含楼层正文合并）为 UTF-8-BOM CSV，Excel 可直接开。</p>
+        <div class="row">
+          <input id="j-out" value="threads.csv">
+          <button class="primary" id="btn-export">导出 CSV</button>
+        </div>
+        <div id="export-msg" class="hint"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>任务运行情况</h3>
+      <p class="hint"><b>同一节点</b>（你 = <code id="node-badge">admin</code>）同类任务<b>互斥</b>：
+        再点「开始采集」会被拒 —— 两个任务会重复请求同一批页、互相踩水位线。
+        <b>不同节点之间允许并行</b>：管理员本机与各成员各采各的，靠 tid 幂等去重汇总
+        （详见《分布式抓取协作方案》）。</p>
+      <div id="job-list" class="joblist"></div>
+      <div id="job-log" class="logbox"><p class="hint">选择一个任务查看实时日志。</p></div>
+    </div>
+  </div>
+
+  <!-- ---------- 子页：协作采集 ---------- -->
+  <div class="subpanel hidden" id="sub-assist">
+    <div class="grid2">
+      <div class="card card-wide">
+        <h3>协作采集（Beta）· 成员协助正文采集</h3>
+        <p class="hint">
+          管理员发布<b>协助请求</b>（选部门 → 自动挑出还没采详情的帖），成员用
+          <b>本地 agent</b> 领活、在自己机器上采正文、回传，<b>管理员的权威库自动合并</b>。
+          双方都能在这里看到<b>同一条实时日志</b>（带任务编号）。
+        </p>
+        <p class="hint">
+          ★ 合并规则：<b>不跳过，采取并覆盖</b> ——
+          成员回传的楼层里，<b>同一帖同一楼层（pid）用成员版覆盖本地版</b>；
+          成员多采到的楼层（<b>站方追加的回复 = 增量</b>）直接<b>加进来</b>；
+          本地有、成员没采到的楼层<b>保留</b>（不因成员少采而丢数据）。
+          每次覆盖与新增都进<b>合并记录表</b>，可查。
+        </p>
+        <p class="hint">
+          ★ 成员端的承诺：agent 用<b>内存 SQLite</b>采集，<b>全程不写任何磁盘文件</b>，
+          回传成功即释放 —— 站方看到的是<b>多个分散的普通用户</b>，不是一个服务器在集中爬。
+        </p>
+        <p class="hint">
+          ★ 与服务器失联 → agent <b>自动停止</b>（心跳断了就不再领活、不再采，
+          采到一半的帖也不会回传半截数据）。
+        </p>
+      </div>
+
+      <div class="card" id="assist-admin">
+        <h3>发布协助请求</h3>
+        <p class="hint">选部门 → 自动挑出该部门下**还没采详情**的帖，拆成单帖的活派给成员。</p>
+        <div class="row">
+          <input id="as-title" placeholder="标题（会出现在任务编号旁）">
+          <input id="as-total" type="number" value="50" min="1" title="最多拆多少帖">
+        </div>
+        <div class="picker" id="picker-assist">
+          <div class="picker-bar">
+            <input class="dp-search" type="search" placeholder="筛选部门" autocomplete="off">
+            <button class="tiny" data-pick="all">全选</button>
+            <button class="tiny" data-pick="none">清空</button>
+            <button class="tiny" data-pick="invert">反选</button>
+            <span class="dp-count"></span>
+          </div>
+          <div class="picker-list"></div>
+        </div>
+        <div class="row">
+          <button class="primary" id="btn-assist-create">发布协助请求</button>
+        </div>
+      </div>
+
+      <div class="card" id="assist-member">
+        <h3>我要协助</h3>
+        <p class="hint">点「领活」后，agent 会自动领取并回传。也可以直接用命令行跑 agent。</p>
+        <div class="row">
+          <label class="lbl">一次领</label>
+          <input id="as-limit" type="number" value="50" min="1" title="这一轮领多少帖">
+          <span class="dim">帖</span>
+          <button class="primary" id="btn-assist-pick">领活</button>
+        </div>
+        <div class="hint" id="assist-member-tip"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>协作任务</h3>
+      <p class="hint">「进行中」= 已领走还没回传的活；「还剩」= 池子里还没人领的活。
+        超过 30 分钟没回传的活会自动<b>退回池子</b>（防止有人领了不干把池子占死）。<br>
+        <b>点任意一行可看这个任务的详情</b>（哪几帖采到了、哪几帖还欠着、谁采的）。</p>
+      <div class="tablewrap"><table id="t-assist"></table></div>
+    </div>
+
+    <div class="card" id="online-card">
+      <h3>在线节点（谁在采、有没有卡住）</h3>
+      <p class="hint">「在线」= 5 分钟内有心跳。进行中 &gt; 0 且心跳停在几分钟前 →
+        多半是那个成员的 agent 卡住了，先让他停掉重开。</p>
+      <div class="tablewrap"><table id="t-online"></table></div>
+    </div>
+
+
+    <div class="card" id="members-card">
+      <h3>成员名单</h3>
+      <p class="hint">只有名单里的邮箱能登录。添加成员后，把初始密码告诉对方即可；
+        对方登录后可在右上角<b>自行改密码</b>。</p>
+      <div class="row">
+        <input id="mb-email" placeholder="成员邮箱">
+        <input id="mb-pw" placeholder="初始密码（留空自动生成）">
+        <input id="mb-note" placeholder="备注（组名/负责部门）">
+        <button class="primary" id="btn-mb-add">添加成员</button>
+      </div>
+      <div class="tablewrap"><table id="t-members"></table></div>
+    </div>
+
+    <div class="card">
+      <h3>实时日志（管理员与成员看的是同一条流）</h3>
+      <p class="hint">节点徽标区分是谁在采；<b>任务编号</b>（如 A1）用于对齐双方记录。</p>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="st-all"> 显示全部节点</label>
+        <button class="ghost" id="btn-st-clear">清屏</button>
+        <span class="dim" id="st-status"></span>
+      </div>
+      <div class="logbox" id="stream-log"><p class="hint">等待日志…</p></div>
+    </div>
+    <div class="card" id="conflicts-card">
+      <h3>合并记录（覆盖 / 新增的痕迹）</h3>
+      <p class="hint">成员回传时，每一次<b>覆盖</b>（同楼层用成员版替换本地版）与
+        <b>新增</b>（站方追加的回复 = 增量）都留一行：谁回的、本地原来是什么、
+        成员传了什么。<b>可查、可追责</b>。</p>
+      <div class="row">
+        <button class="ghost" id="btn-conflicts-refresh">刷新</button>
+        <span class="dim" id="cf-count"></span>
+      </div>
+      <div class="tablewrap"><table id="t-conflicts"></table></div>
+      <!-- ★ 翻页 + 折叠条（2026-10-23 加）
+           合并记录会越积越多，一次铺开能顶掉好几屏；
+           给一条「翻页 + 收起/展开」的条，把长表压住。 -->
+      <div class="row" id="cf-bar" style="margin-top:10px">
+        <button class="ghost tiny" id="cf-prev">上一页</button>
+        <span class="dim" id="cf-page">第 1 / 1 页</span>
+        <button class="ghost tiny" id="cf-next">下一页</button>
+        <span class="sep"></span>
+        <button class="ghost tiny" id="cf-toggle">收起</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ---------- 子页：我的账号 ---------- -->
+  <div class="subpanel hidden" id="sub-me">
+    <div class="grid2">
+      <div class="card">
+        <h3>我的身份</h3>
+        <div class="kv" id="me-info"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="ghost" id="btn-pw-change">改密码</button>
+          <button class="ghost" id="btn-logout">退出登录</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <input id="agent-cmd" readonly placeholder="成员端启动命令">
+          <button class="tiny" id="btn-copy-cmd">复制</button>
+        </div>
+        <p class="hint">成员在自己机器上跑这一行即可；<code>--once</code> 可只跑一轮试水。</p>
+      </div>
+
+      <div class="card">
+        <h3>改密码</h3>
+        <p class="hint">密码只有你自己知道就行：管理员重置你密码后，
+          <b>登录后请在这里自己改掉</b>，不必一直用管理员给的临时口令。</p>
+        <div class="row">
+          <button class="primary" id="btn-pw-change2">打开改密码表单</button>
+        </div>
+        <p class="hint" id="pw-state"></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 体检 ================= -->
+<section class="panel hidden" id="tab-integrity">
+  <div class="card">
+    <h3>详情完整性体检</h3>
+    <p class="hint">硬判据：缺头（楼主楼）/ 缺尾（末楼）/ 页数不足 / 正文为空 → 判为问题。
+       软警告：楼层号缺口、站方回复计数与实收楼层不自洽（站方自己的计数问题，不算我们漏采）。</p>
+    <p class="hint"><b>已识别的增量</b>：站方的「回复数」比<b>我们上次采集时变大了</b>
+       → 站方又回复了，本地那份正文<b>过时了</b>（已自动标记「待重采」并丢回队列）。
+       勾选后点「重跑所选」重新采一遍，新楼层会自动合并进来。</p>
+    <p class="hint">⚠ 注意与下面的<b>软警告</b>区分：「站方称 N+1 楼、本地实收 N 楼」
+       是<b>站方自己的计数不自洽</b>（常见，差 1），既不算我们漏采，也<b>不算增量</b>。</p>
+    <div class="row">
+      <button class="primary" id="btn-integrity">开始体检</button>
+      <button class="ghost" id="btn-int-sel-problem">全选问题帖</button>
+      <button class="ghost" id="btn-int-sel-growth">全选待重采</button>
+      <button class="ghost" id="btn-int-sel-warn">全选软警告</button>
+      <button class="ghost" id="btn-int-sel-all">全选（全部可勾选的）</button>
+      <button class="ghost" id="btn-int-clear-sel">取消选择</button>
+      <span class="hint" id="int-sel-info"></span>
+    </div>
+    <div class="row">
+      <button class="primary" id="btn-int-retry">重跑所选</button>
+      <button class="ghost danger" id="btn-int-purge">清除所选</button>
+      <span class="hint">「重跑」= 数据留着，重新采一遍；「清除」= 彻底删掉，从零开始。</span>
+    </div>
+    <div id="integrity-out"></div>
+  </div>
+</section>
+
+<!-- ================= 日志 ================= -->
+<section class="panel hidden" id="tab-log">
+  <div class="card">
+    <h3>采集日志（fetch_log）</h3>
+    <div class="row">
+      <select id="log-phase">
+        <option value="">全部阶段</option>
+        <option value="list">list</option>
+        <option value="detail">detail</option>
+        <option value="doctor">doctor</option>
+      </select>
+      <button class="ghost" id="btn-log-refresh">刷新</button>
+    </div>
+    <div class="tablewrap tall"><table id="t-log"></table></div>
+  </div>
+</section>
+
+</main>
+
+<!-- 详情抽屉 -->
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div>
+      <h2 id="dw-title">—</h2>
+      <div id="dw-meta" class="dim"></div>
+    </div>
+    <button class="ghost" id="dw-close">关闭</button>
+  </div>
+  <div id="dw-body" class="drawer-body"></div>
+</div>
+<div class="mask" id="mask"></div>
+
+<div class="toast" id="toast"></div>
+
+<!-- ================= 改密码（正式表单，不是 prompt） ================= -->
+<div class="modal" id="modal-pw">
+  <form class="modal-card" id="pw-form">
+    <h2>修改密码</h2>
+    <p class="hint" id="pw-who">—</p>
+
+    <label class="pw-row">
+      <span>当前密码</span>
+      <span class="pw-input">
+        <input id="pw-old" type="password" autocomplete="current-password" placeholder="你正在用的密码" required>
+        <button type="button" class="pw-eye" data-eye="pw-old">显示</button>
+      </span>
+    </label>
+
+    <label class="pw-row">
+      <span>新密码</span>
+      <span class="pw-input">
+        <input id="pw-new" type="password" autocomplete="new-password" placeholder="至少 6 位" required>
+        <button type="button" class="pw-eye" data-eye="pw-new">显示</button>
+      </span>
+      <span class="pw-meter"><i id="pw-bar"></i></span>
+      <span class="hint" id="pw-strength">强度：—</span>
+    </label>
+
+    <label class="pw-row">
+      <span>确认新密码</span>
+      <span class="pw-input">
+        <input id="pw-new2" type="password" autocomplete="new-password" placeholder="再输一次" required>
+        <button type="button" class="pw-eye" data-eye="pw-new2">显示</button>
+      </span>
+    </label>
+
+    <div class="lg-err" id="pw-err"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:14px">
+      <button type="button" class="ghost" id="pw-cancel">取消</button>
+      <button type="submit" class="primary" id="pw-submit">确认修改</button>
+    </div>
+    <p class="hint">改完立即生效，当前登录状态不受影响。
+      忘了当前密码？找管理员在「成员名单」里重置 —— 重置后你再在这里自行改掉。</p>
+  </form>
+</div>
+
+<!-- ================= 登录 ================= -->
+<div class="login-wrap" id="login">
+  <form class="login-card" id="login-form">
+    <h2>民生e点通 · 舆情采集器</h2>
+    <p class="hint">用<b>成员邮箱</b>登录。管理员看全部功能；成员可看数据、用采集与协作界面。</p>
+    <input id="lg-email" type="email" placeholder="邮箱" autocomplete="username" required>
+    <input id="lg-pw" type="password" placeholder="密码" autocomplete="current-password" required>
+    <div class="lg-err" id="lg-err"></div>
+    <button class="primary" type="submit" id="lg-btn">登录</button>
+    <p class="hint"><a href="#" id="lg-to-reg">没有账号？注册一个 →</a></p>
+    <p class="hint" id="lg-tip"></p>
+  </form>
+
+  <form class="login-card hidden" id="reg-form">
+    <h2>注册成员账号</h2>
+    <p class="hint">注册后**需管理员审核通过**才能登录（防止陌生人占用采集资源）。</p>
+    <input id="rg-email" type="email" placeholder="邮箱" autocomplete="username" required>
+    <input id="rg-pw" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password" required>
+    <input id="rg-pw2" type="password" placeholder="再输一次" autocomplete="new-password" required>
+    <div class="lg-err" id="rg-err"></div>
+    <button class="primary" type="submit" id="rg-btn">注册</button>
+    <p class="hint"><a href="#" id="rg-to-login">已有账号？去登录 →</a></p>
+  </form>
+</div>
+
+<script src="/static/app.js?v=__JSV__"></script>
+</body>
+</html>

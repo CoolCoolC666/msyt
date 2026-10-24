@@ -1,0 +1,51 @@
+# ==============================================================
+# 行尾策略
+# ==============================================================
+# 默认：文本文件在仓库里存 LF，检出时按各类型规则还原。
+* text=auto
+
+# ★ .cmd / .bat 必须是 **CRLF**
+#   cmd.exe 在 LF-only 文件上，label / goto 会被咬坏，
+#   表现是「双击闪退」，而且报错信息完全指不到真因。
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# 源码与文档统一 LF（避免 Windows 上出现混合行尾）
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.sql   text eol=lf
+
+# ==============================================================
+# 二进制：一律不参与行尾转换、不做 diff
+# ==============================================================
+*.docx  binary
+*.xlsx  binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+*.zip   binary
+*.db    binary
+*.db-wal binary
+*.db-shm binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.mp4   binary
+
+# ==============================================================
+# 差异合并：把生成的产物降噪，别让每次 commit 都吵
+# ==============================================================
+程序/data/exports/**  linguist-generated=true
+程序/data/*.log       linguist-generated=true
+*_报告/*.docx         linguist-generated=true

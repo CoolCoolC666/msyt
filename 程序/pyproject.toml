@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msyt"
+version = "1.0.0"
+description = "民生e点通·天一论坛 群众留言板（fid=1176）舆情采集器"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "仅供教学分析使用" }
+dependencies = [
+    "requests>=2.28",
+    "beautifulsoup4>=4.11",
+]
+
+[project.optional-dependencies]
+# 中文分词（msyt search --tokenize 时用；不装会自动退回不切词）
+jieba = ["jieba>=0.42"]
+
+[project.scripts]
+msyt = "msyt.cli:main"
+
+[tool.setuptools]
+packages = ["msyt"]
+
+[tool.setuptools.package-data]
+msyt = ["py.typed"]

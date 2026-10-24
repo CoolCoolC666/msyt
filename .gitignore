@@ -1,0 +1,84 @@
+# ==============================================================
+# msyt —— 舆情采集器
+# ==============================================================
+# ★ 本仓库是**脱敏后的发布版**：不含任何真实地址、密码、成员信息。
+#   想跑起来，按「程序/data/README.md」的说明自己填配置。
+
+# ---------- 运行时数据（含成员表、密码哈希、全部采集数据）----------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+程序/data/msyt.db*
+程序/data/exports/
+
+# ---------- 凭据与密钥（★ 绝不能提交）----------
+程序/data/*token*
+程序/data/*secret*
+程序/data/*账号*
+程序/data/*.key
+程序/data/*.pem
+*.env
+.env
+.env.*
+secrets/
+
+# ---------- 运行痕迹 ----------
+*.log
+*.pid
+*.out
+程序/data/web.out.log
+程序/data/web.err.log
+程序/data/docs/
+程序/docs/
+
+# ---------- 本机地址与域名配置（自己填）----------
+程序/data/tunnel-domain.txt
+程序/data/agent-api-base.txt
+程序/data/cf-service-token.txt
+程序/data/credentials.json
+程序/config.json
+
+# ---------- 站点数据与导出（体量大，且含站方内容）----------
+复核/
+对接/
+_截图/
+*.csv
+*.jsonl
+程序/data/exports/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.bak
+*.bak-*
+
+# ---------- 临时与草稿 ----------
+_tmp_*
+_*.log
+*.tmp
+*.bak
+scratch/
+__pycache__
