@@ -44,6 +44,7 @@ secrets/
 复核/
 对接/
 _截图/
+_备份/                            # 数据库快照（含成员邮箱/口令）
 *.csv
 *.jsonl
 程序/data/exports/

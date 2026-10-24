@@ -133,7 +133,7 @@ class ListCollector:
                 break
 
             info = parse_list_page_info(r.text)
-            rows = parse_list_page(r.text)
+            rows = parse_list_page(r.text, url)
             if not rows:
                 self.db.log("list", source.key, "empty_page", True, f"page={page}")
                 self.client.log(f"[list] {source.key} 第 {page} 页无数据 → 该源已到底")
@@ -235,11 +235,12 @@ class ListCollector:
         before = self.db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         found = 0
         for p in range(1, max(1, head_pages) + 1):
+            url = source.url_for(p)
             try:
-                r = self.client.get(source.url_for(p), throttle="list")
+                r = self.client.get(url, throttle="list")
             except HttpError:
                 break
-            rows = parse_list_page(r.text)
+            rows = parse_list_page(r.text, url)
             if not rows:
                 break
             found += len(rows)

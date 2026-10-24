@@ -14,6 +14,9 @@
    站方 JS 写得很直白：
        jQuery('#postmsg_'+pid).replaceWith(html)
    → 所以「正文容器」就是 postmsg_{pid}，ajax 返回的 html 是它的替换体。
+   ★ 但**「这一页有哪些楼层」要看外层容器 `#post_{pid}`**，不是 postmsg_：
+     站方偶尔不给某层生成 postmsg_ 容器（ajax 照样返回它的正文），
+     只认 postmsg_ 会漏掉那一层、把整帖卡在半截。详见 _POSTBOX_RE。
 
 3) 详情页会分页：一帖 N 页，每页有**各自的 token**，
    ajax 也只返回**当页**楼层。实测（tid=8339985，3 页）：
@@ -131,14 +134,85 @@ def _num(s: str) -> int:
     return int(m.group()) if m else 0
 
 
+#: 站方链接里的 tid 参数
+_TID_RE = re.compile(r"[?&]tid=(\d+)")
+
+
+def _abs_url(href: str, list_url: str = "") -> str:
+    """把站方的相对链接补成绝对地址。
+
+    base 从当前列表页地址推（`…/forum.php` 之前那一段），
+    推不出来就退回站方默认域名 —— 不写死具体板块路径。
+    """
+    href = (href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("http"):
+        return href
+    base = "https://bbs.cnnb.com.cn"
+    if list_url and "/forum.php" in list_url:
+        base = list_url.split("/forum.php")[0]
+    return f"{base}/{href.lstrip('./')}"
+
+
+def parse_announcements(soup, list_url: str = "") -> List[ListRow]:
+    """解析列表页顶部的「全局公告」区（``#msbgt``）。
+
+    ★ 为什么必须单独识别（2026-10-24，用户反馈「置顶的帖会漏采」）：
+      公告区**不是帖子行**。它的真实结构是::
+
+          <div id="msbgt" class="flms"><div class="wrapper1">
+            <a href="forum.php?mod=viewthread&tid=6177045">…管理规定</a>
+            <a href="forum.php?mod=viewthread&tid=7342697">…删帖流程…</a>
+            <a href="forum.php?mod=viewthread&tid=7342780">…总版规…</a>
+          </div></div>
+
+      没有 ``tbody[id^=normalthread_]`` 那种结构 → 旧的列表解析器
+      （只扫帖子行）**永远看不见它们** → 公告帖一条都没进过库。
+      实测库里 tid=7342780 / 7342697 / 6177045 全部为 0 条。
+
+    公告行能给的元数据很少：只有 tid / 标题 / 链接；
+    类别、受理状态、部门、作者、时间**都得靠详情页补**。
+    """
+    out: List[ListRow] = []
+    seen = set()
+    for a in soup.select("#msbgt a[href*='viewthread']"):
+        href = a.get("href") or ""
+        m = _TID_RE.search(href)
+        if not m:
+            continue
+        tid = int(m.group(1))
+        if tid in seen:
+            continue
+        title = a.get_text(strip=True)
+        if not title:
+            continue
+        seen.add(tid)
+        out.append(ListRow(tid=tid, title=title, url=_abs_url(href, list_url)))
+    return out
+
+
 def parse_list_page(html: str, list_url: str = "") -> List[ListRow]:
-    """解析一页列表。返回去重后的行（同一 tid 可能出现两次）。"""
+    """解析一页列表。返回去重后的行（同一 tid 可能出现两次）。
+
+    ★ 三种来源都要收（2026-10-24 补，组员反馈「置顶的帖会漏采」）：
+      ① `normalthread_XXX` —— 普通帖
+      ② `stickthread_XXX`  —— **置顶帖**（站方把重要帖钉在列表顶部）
+         ★ 旧实现只取 ① → **置顶帖从来没被采到过**（库里一个都没有）
+      ③ `#msbgt` 公告区     —— **全局公告**（每个板块列表页顶部那几个红字链接）
+         ★ 它们根本不是帖子行，是独立的链接块 → 旧实现完全没看 → 也漏
+    """
     soup = BeautifulSoup(html or "", "html.parser")
     rows: List[ListRow] = []
     seen = set()
 
-    for tb in soup.select("tbody[id^=normalthread_]"):
-        m = re.search(r"normalthread_(\d+)", tb.get("id") or "")
+    # ---- ① 普通帖 + ② 置顶帖（结构相同，一起解析）----
+    #    ★ 顺序要紧：**先收帖行，后收公告**。
+    #      同一个 tid 可能既是置顶帖、又出现在公告区（实测 tid=6177045 两者都是）。
+    #      帖行的元数据更全（作者/发帖时间/回复数/浏览数），
+    #      公告行只有标题和链接 → 先到先得，**让帖行赢**。
+    for tb in soup.select("tbody[id^=normalthread_], tbody[id^=stickthread_]"):
+        m = re.search(r"(?:normalthread|stickthread)_(\d+)", tb.get("id") or "")
         if not m:
             continue
         tid = int(m.group(1))
@@ -197,8 +271,7 @@ def parse_list_page(html: str, list_url: str = "") -> List[ListRow]:
             row.title = a.get_text(strip=True)
             href = a.get("href") or ""
             if href:
-                row.url = f"https://bbs.cnnb.com.cn/{href.lstrip('./')}" \
-                    if not href.startswith("http") else href
+                row.url = _abs_url(href, list_url)
         row.has_image = 1 if th.select_one("img[alt=attach_img]") else 0
 
         # ---- by / num 两组单元格 ----
@@ -235,6 +308,13 @@ def parse_list_page(html: str, list_url: str = "") -> List[ListRow]:
 
         if row.title:
             rows.append(row)
+
+    # ---- ③ 全局公告区（最后收：帖行已占的 tid 自动跳过）----
+    for r in parse_announcements(soup, list_url):
+        if r.tid in seen:
+            continue
+        seen.add(r.tid)
+        rows.append(r)
     return rows
 
 
@@ -355,6 +435,21 @@ def parse_site_notice(html: str) -> str:
     return SITE_RESTRICTED
 _PAGECOUNT_RE = re.compile(r"共\s*(\d+)\s*页")
 _POSTMSG_RE = re.compile(r'id="postmsg_(\d+)"')
+#: 外层楼层容器 `<div id="post_{pid}">` —— **这一页有哪些楼层的完整清单**
+#:
+#: ★ 为什么以它为准、而不是 postmsg_（2026-10-24 修正）：
+#:   实测 tid=6177045 第 4 页：post_ 容器 15 个，postmsg_ 锚点只有 14 个。
+#:   缺的那层（pid=108201995，第 51 楼）在页面上**楼层容器是齐的**
+#:   （favatar / postnum / authorposton 都有，楼层号 51 也读得到），
+#:   只是站方**没给它生成 ajax 注入目标**（没有 postmsg_ 容器），
+#:   而 ajax_getpost 照样返回了它的正文。
+#:   旧实现只认 postmsg_ → 少一个 pid → 「pid 集合精确相等」校验失败
+#:   → **整帖停在第 3 页**，后面的 3 页再也采不到。
+#:
+#:   已批量验证的不变式（5 个帖共 15 页全过）：
+#:     postmsg_ ⊆ post_  且  post_ == ajax 返回集合（精确相等）
+#:   → 用 post_ 既不会漏楼层，也不会放宽防串帖的校验。
+_POSTBOX_RE = re.compile(r'id="post_(\d+)"')
 #: 详情页分页块：<div class="pgt"><div class="pg"><strong>1</strong><a ...&page=2>2</a>
 _PG_BLOCK_RE = re.compile(r'<div class="pg">(.{0,3000}?)</div>', re.S)
 _PG_HREF_RE = re.compile(r'href="[^"]*[?&]page=(\d+)"')
@@ -392,9 +487,12 @@ def parse_thread_page(html: str, tid: int = 0, page_no: int = 1) -> ThreadPage:
     mt = _TOKEN_RE.search(html)
     tp.token = mt.group(1) if mt else ""
 
-    # pid 锚点：postmsg_ 是 JS 的替换目标，post_ 是外层容器，两者同序。
-    # 以 postmsg_ 为准（它才是「这一页有哪些楼层」的权威清单）。
-    pids = [int(x) for x in _POSTMSG_RE.findall(html)]
+    # pid 清单：post_ 外层容器是**全集**，postmsg_ 只是「正文由 ajax 注入」的子集。
+    # 站方偶尔不给某层生成 postmsg_ 容器（见 _POSTBOX_RE 上方说明），
+    # 只认 postmsg_ 会漏掉那一层 → pid 集合校验失败 → 整帖采不下去。
+    pids_box = [int(x) for x in _POSTBOX_RE.findall(html)]
+    pids_msg = [int(x) for x in _POSTMSG_RE.findall(html)]
+    pids = pids_box if pids_box else pids_msg
     # 去重但保持顺序
     seen = set()
     tp.pids = [p for p in pids if not (p in seen or seen.add(p))]

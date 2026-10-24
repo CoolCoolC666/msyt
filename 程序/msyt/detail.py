@@ -51,6 +51,13 @@ GAP_RETRY_MAX = 2
 #: 补采次数在 detail_warn 里的记号
 GAP_RETRY_MARK = "已补采"
 
+#: 单帖页数的**硬天花板**（2026-10-24 加）
+#:   防的是「站方给出一个离谱的总页数」这种异常，不是限制正常长帖。
+#:   实测站方盖楼活动置顶帖 tid=8333204 有 **81 页**（站方自己标的），
+#:   默认上限 50 页会把它卡在一半（750/1207 楼）——
+#:   而且断点续传也救不了：续传从 pages_done+1 起算，一样越过不了 50。
+DETAIL_PAGE_HARD_CAP = 500
+
 
 def is_short_and_retryable(expect_posts: int, got_posts: int,
                             floors: Optional[List[int]] = None) -> bool:
@@ -100,7 +107,11 @@ class DetailCollector:
         seen_set = set(seen)
         pages_ok = 0
         page_no = max(1, pages_done + 1)
-        page_budget = self.cfg.detail_max_pages
+        # ★ 预算至少要够「进得去循环」：续传时 pages_done 可能已经 ≥ 默认上限
+        #   （实测盖楼活动置顶帖 81 页，默认上限 50），
+        #   若预算照旧是 50，while page_no(51) <= 50 直接不成立 → **循环一次都不跑**，
+        #   续传等于空转。真正的上限在下面按站方自己标的总页数放开。
+        page_budget = max(self.cfg.detail_max_pages, pages_done + 1)
         flow_saved = False
         last_error = ""
         stopped = False
@@ -144,6 +155,21 @@ class DetailCollector:
                 break
             if page_no == 1 and not site_total_pages:
                 site_total_pages = tp.total_pages
+            elif tp.total_pages and tp.total_pages > site_total_pages:
+                # ★ 续传时是从第 pages_done+1 页起的，**不会经过 page_no==1**，
+                #   所以总页数必须在**每一页**都更新一次，
+                #   否则续传的帖永远拿不到站方标的总页数 → 预算放不开。
+                site_total_pages = tp.total_pages
+            # ★ 站方**自己标了**总页数，且超过了默认上限 → 放开预算，
+            #   采到站方说的那一页为止（另设硬天花板防异常）。
+            #   旧逻辑一刀切在 detail_max_pages=50 → 81 页的盖楼帖只采一半，
+            #   而且**断点续传也接不上**（续传从 pages_done+1 起算，
+            #   一样落在 50 之外）→ 永远补不齐。
+            if site_total_pages > page_budget:
+                page_budget = min(site_total_pages, DETAIL_PAGE_HARD_CAP)
+                self.client.log(
+                    f"[detail] tid={tid} 站方总页数 {site_total_pages} > 默认上限，"
+                    f"本次预算放宽到 {page_budget} 页")
 
             # ★ token 即用：紧接着发，中间不得插入任何 sleep
             try:

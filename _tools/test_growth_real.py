@@ -63,10 +63,15 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     # ① 挑一个**本地已采完详情**的帖（增量识别只对 done 的帖生效），
     #    并且它所属的源要小（重采便宜）
+    # ★ `replies >= 3` 是**必需**的选样条件（2026-10-24 修）：
+    #   本测试的手法是「人为把库里的回复数改小，站方真实值更大 → 应判为增量」。
+    #   若挑中 replies=0 的帖（只有楼主的单楼帖），改小后 `max(0, 0-3)` **还是 0**，
+    #   改前改后完全一样 → 不可能出现增量 → 必然假失败。
+    #   （实测曾挑中 tid=8343588，replies=0，三个断言全挂 —— 是选样问题，不是代码问题。）
     cand = conn.execute(
         "SELECT t.tid, t.replies, s.source FROM threads t "
         "JOIN thread_sources s ON s.tid=t.tid "
-        "WHERE COALESCE(t.detail_state,'pending')='done' "
+        "WHERE COALESCE(t.detail_state,'pending')='done' AND t.replies >= 3 "
         "GROUP BY t.tid ORDER BY t.tid DESC").fetchall()
     if not cand:
         print("  （库里还没有采完详情的帖，跳过）")
