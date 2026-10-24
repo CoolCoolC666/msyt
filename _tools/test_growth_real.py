@@ -104,8 +104,12 @@ def main() -> int:
 
     try:
         # ③ 重采这个源（restart=true → 从头采，不看断点）
+        #    ★ pages 只取 3：选中的帖在第 1 页，且这个源站方**没给总页数**
+        #      （max_page=0）→ 采集会一直翻到 pages 上限。
+        #      实测 pages=500 跑了 **23.6 分钟 / 500 页 / 2500 行**，
+        #      其中绝大多数是站方回绕到第 1 页的重复内容 → 纯属浪费。
         r = call("/api/jobs/list", "POST",
-                 {"dept_ids": [dept_id], "pages": 500, "restart": True,
+                 {"dept_ids": [dept_id], "pages": 3, "restart": True,
                   "node": "admin"}, token=tok)
         jid = r["job"]["id"]
         print(f"  已启动列表采集 {jid}（源 {SOURCE}）…")
