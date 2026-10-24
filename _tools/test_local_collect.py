@@ -63,7 +63,10 @@ def call(path, method="GET", body=None, token="", timeout=120):
 
 
 def main() -> int:
-    pw = os.environ.get("MSYT_TEST_PW", "")
+    # ★ 默认给上口令（2026-10-24 修）：原来默认是空串 → 登录必然 401，
+    #   整个测试在第一步就挂掉，看上去像"功能坏了"，其实只是没设环境变量。
+    #   环境变量仍可覆盖（成员改了口令时用 MSYT_TEST_PW 传新的）。
+    pw = os.environ.get("MSYT_TEST_PW", "test-password")
     email = os.environ.get("MSYT_TEST_EMAIL", "test@example.com")
 
     st, d = call("/api/auth/login", "POST", {"email": email, "password": pw})

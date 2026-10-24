@@ -27,7 +27,10 @@ sys.path.insert(0, PROG)
 
 BASE = "http://127.0.0.1:8765"
 ADMIN = ("qa-admin@example.com", "qa-test-password")
-MEMBER = ("test@example.com", os.environ.get("MSYT_TEST_PW", ""))
+# ★ 默认给上口令（2026-10-24 修）：原来默认空串 → 成员登录必然 401，
+#   于是「成员移除 → 403」这条断言拿到的是 401，看着像权限逻辑坏了，
+#   其实只是没设环境变量。环境变量仍可覆盖（成员改了口令时传 MSYT_TEST_PW）。
+MEMBER = ("test@example.com", os.environ.get("MSYT_TEST_PW", "test-password"))
 results = []
 
 

@@ -112,10 +112,15 @@ def main() -> int:
             z.extractall(tmpdir)
 
         # ---------- 2. 挑一个可采的待采帖 ----------
+        # ★ 只挑 `pending`（**从没采过**）的帖（2026-10-24 修）：
+        #   原条件是 `detail_state <> 'done'`，会把 **stale**（采过、待重采）也算进来。
+        #   stale 帖的楼层**本来就在库里**，重采后楼层数不变是正常的 →
+        #   下面「权威库里楼层增加了」这条断言必然挂（实测 3 → 3）。
+        #   挑 pending 才能让「楼层增加」成为真正有意义的判据。
         conn = sqlite3.connect(cfg.db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT tid FROM threads WHERE COALESCE(detail_state,'pending')<>'done' "
+            "SELECT tid FROM threads WHERE COALESCE(detail_state,'pending')='pending' "
             "ORDER BY tid DESC LIMIT 40").fetchall()
         cand = [int(r["tid"]) for r in rows]
         conn.close()
