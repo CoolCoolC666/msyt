@@ -171,6 +171,37 @@ def ipv4_only() -> bool:
     return _IPV4_ONLY
 
 
+# ---------------------------------------------------------------- 小助手端口
+def local_helper_port(default: int = 8766) -> int:
+    """本机小助手监听端口。
+
+    ★ 顺序：环境变量 `MSYT_HELPER_PORT` → 包里的 `helper-port.txt` → 默认值。
+      （包里的那个文件是**成员自己**改端口的地方：改完保存 → 重启助手即可。）
+    """
+    import os
+    v = os.environ.get("MSYT_HELPER_PORT", "").strip()
+    if v.isdigit() and 1024 <= int(v) <= 65535:
+        return int(v)
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (here, os.path.dirname(here), os.getcwd()):
+        p = os.path.join(d, "helper-port.txt")
+        try:
+            if not os.path.exists(p):
+                continue
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    n = int(line)
+                    if 1024 <= n <= 65535:
+                        return n
+                    break
+        except Exception:                             # noqa: BLE001
+            continue
+    return default
+
+
 # ---------------------------------------------------------------- 探测
 def looks_reachable(r) -> bool:
     """这个 HTTP 响应算不算「**控制面可达**」。

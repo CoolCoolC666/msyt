@@ -1567,7 +1567,44 @@ $('#pw-form').onsubmit = async (ev) => {
    ★ 网址是动态的：启动包由服务端**实时生成**，`--server` 用的是
      下载者此刻访问的地址（本地 127.0.0.1 还是公网域名，自动对上）。 */
 
-const HELPER_URL = 'http://127.0.0.1:8766';
+/* ★ 小助手端口（2026-10-24 用户要求「端口可以自行设置」）
+   三处要知道同一个端口：
+     ① 成员本机的助手监听端口（包里的 helper-port.txt / 启动助手.cmd）
+     ② 网页呼叫助手的端口（这里）
+     ③ 服务端默认（管理员设，决定**新下载的包**用哪个端口）
+   优先级：localStorage（本机自设）→ 服务端默认 → 8766。
+   ★ 对不上时网页会明确提醒「重新下载启动包」。 */
+const HELPER_PORT_KEY = 'msyt.helperPort';
+const DEFAULT_HELPER_PORT = 8766;
+let HELPER_PORT = DEFAULT_HELPER_PORT;
+let HELPER_SERVER_PORT = DEFAULT_HELPER_PORT;   // 服务端默认
+
+function helperUrl() { return 'http://127.0.0.1:' + HELPER_PORT; }
+
+/** 端口写进页面上所有 .hp 的提示里。 */
+function paintHelperPort() {
+  $$('.hp').forEach(el => { el.textContent = String(HELPER_PORT); });
+  const ip = $('#helper-port');
+  if (ip && document.activeElement !== ip) ip.value = HELPER_PORT;
+}
+
+async function loadHelperPort() {
+  // ① 本机自设（localStorage）
+  try {
+    const v = parseInt(localStorage.getItem(HELPER_PORT_KEY) || '', 10);
+    if (v >= 1024 && v <= 65535) HELPER_PORT = v;
+  } catch (_) { /* localStorage 不可用就当没设过 */ }
+  // ② 服务端默认（管理员设的；新下载的包用这个端口）
+  try {
+    const r = await api('/api/agent/helper-port');
+    if (r && r.port) {
+      HELPER_SERVER_PORT = r.port;
+      // 本机没自设过 → 用服务端默认
+      if (!localStorage.getItem(HELPER_PORT_KEY)) HELPER_PORT = r.port;
+    }
+  } catch (_) { /* 读不到就用默认值 */ }
+  paintHelperPort();
+}
 
 $('#btn-bundle').onclick = async () => {
   const msg = $('#bundle-msg');
@@ -1591,7 +1628,8 @@ $('#btn-bundle').onclick = async () => {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
     msg.innerHTML = '已下载 → 解压后双击 <b>启动采集.cmd</b>，'
-      + '装完依赖后按提示输入<b>邮箱和密码</b>即可开跑。';
+      + '装完依赖后按提示输入<b>邮箱和密码</b>即可开跑。'
+      + '（包里的助手端口：<b>' + HELPER_SERVER_PORT + '</b>）';
     toast('启动包已下载');
   } catch (e) {
     msg.innerHTML = `<span style="color:#b42318">下载失败：${esc(e.message)}</span>`;
@@ -1607,7 +1645,7 @@ async function helperCall(path, body) {
   //   助手明明在跑，网页却报「没检测到本机助手」（实测踩到）。
   const t = setTimeout(() => ctl.abort(), 10000);
   try {
-    const res = await fetch(HELPER_URL + path, {
+    const res = await fetch(helperUrl() + path, {
       method: body ? 'POST' : 'GET',
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
@@ -1615,6 +1653,33 @@ async function helperCall(path, body) {
     });
     return await res.json();
   } finally { clearTimeout(t); }
+}
+
+/** 网页叫不到助手时，先去**别的端口**探一下，看是不是端口对不上。 */
+async function probeOtherPorts() {
+  const cands = [HELPER_SERVER_PORT, DEFAULT_HELPER_PORT, 8767, 8765, 8080];
+  for (const p of [...new Set(cands)]) {
+    if (p === HELPER_PORT) continue;
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 2500);
+      const r = await fetch('http://127.0.0.1:' + p + '/status', { signal: ctl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const j = await r.json();
+        return { port: p, real: j.port || p };
+      }
+    } catch (_) { /* 这个端口没助手，继续试下一个 */ }
+  }
+  return null;
+}
+
+/** 端口不一致的提醒（★ 改过端口就必须让包和网页对上）。 */
+function helperPortMismatchText(found) {
+  return '检测到本机助手在跑，但端口是 ' + found.port
+    + '，而网页这边用的是 ' + HELPER_PORT + ' —— 对不上。'
+    + '二选一：① 把上面「小助手端口」改成 ' + found.port + ' 并「保存到本机」；'
+    + '② 改包里的 helper-port.txt 成 ' + HELPER_PORT + '（或重新下载一次启动包）。';
 }
 
 function helperMsg(txt, bad) {
@@ -1640,7 +1705,50 @@ $('#btn-helper-start').onclick = async () => {
       helperMsg((r && r.error) || '助手拒绝了', true);
     }
   } catch (e) {
+    const found = await probeOtherPorts();
+    if (found) {
+      helperMsg('端口对不上：' + helperPortMismatchText(found), true);
+      return;
+    }
     helperMsg('没检测到本机助手 —— 还没起 Agent：先双击包里的「启动助手.cmd」；若助手窗口**已经在跑**却仍提示没检测到，多半是 Edge 拦了「本地网络访问」——点地址栏**左侧**那个图标 → 选「允许此网站访问你的本地网络」；还不行就双击包里的「自检.cmd」，它会直接告诉你哪一环不通', true);
+  }
+};
+
+/* ---- 小助手端口：保存到本机 / 设为服务器默认 ---- */
+$('#btn-helper-port-save').onclick = () => {
+  const v = parseInt($('#helper-port').value, 10);
+  const msg = $('#helper-port-msg');
+  if (!(v >= 1024 && v <= 65535)) {
+    msg.innerHTML = '<span style="color:#b42318">端口要在 1024~65535 之间</span>';
+    return;
+  }
+  try { localStorage.setItem(HELPER_PORT_KEY, String(v)); } catch (_) { }
+  HELPER_PORT = v;
+  paintHelperPort();
+  msg.innerHTML = '本机端口已改为 <b>' + v + '</b>。'
+    + '★ 包里也要用同一个端口（改包里的 <code>helper-port.txt</code>，'
+    + '或在网页上「设为服务器默认」后重新下载一次包），否则网页叫不到助手。';
+};
+
+$('#btn-helper-port-default').onclick = async () => {
+  const v = parseInt($('#helper-port').value, 10);
+  const msg = $('#helper-port-msg');
+  if (!(v >= 1024 && v <= 65535)) {
+    msg.innerHTML = '<span style="color:#b42318">端口要在 1024~65535 之间</span>';
+    return;
+  }
+  try {
+    const r = await api('/api/agent/helper-port', {
+      method: 'POST', body: JSON.stringify({ port: v }),
+    });
+    HELPER_SERVER_PORT = r.port;
+    msg.innerHTML = '服务器默认端口已改为 <b>' + r.port + '</b>。'
+      + '★ <b>已经下载过包的成员需要重新下载一次</b>，包里的端口才会跟上；'
+      + '没下载过的下次直接就是新的。';
+    toast('服务器默认端口已更新');
+  } catch (e) {
+    msg.innerHTML = '<span style="color:#b42318">改不了：' + esc(e.message)
+      + '（只有管理员能改服务器默认；成员改「保存到本机」即可）</span>';
   }
 };
 
@@ -1673,11 +1781,19 @@ async function pollHelper() {
       if (_helperFails >= 3) {
         clearInterval(_helperTimer);
         _helperTimer = null;
-        box.innerHTML = '<p class="hint"><b>没检测到本机助手（127.0.0.1:8766）</b><br>'
-          + '① 双击包里的「启动助手.cmd」<br>'
-          + '② 助手窗口已经在跑却还报这个 → 多半是 <b>Edge 拦了「本地网络访问」</b>：'
-          + '点地址栏<b>左侧</b>那个图标 → 选「允许此网站访问你的本地网络」<br>'
-          + '③ 还不行 → 双击包里的「自检.cmd」，它会直接告诉你哪一环不通</p>';
+        // ★ 端口对不上是很常见的一种「没检测到」→ 先去别的端口探一下
+        const found = await probeOtherPorts();
+        if (found) {
+          box.innerHTML = '<p class="hint"><b>端口对不上</b><br>'
+            + esc(helperPortMismatchText(found)) + '</p>';
+        } else {
+          box.innerHTML = '<p class="hint"><b>没检测到本机助手（127.0.0.1:'
+            + HELPER_PORT + '）</b><br>'
+            + '① 双击包里的「启动助手.cmd」<br>'
+            + '② 助手窗口已经在跑却还报这个 → 多半是 <b>Edge 拦了「本地网络访问」</b>：'
+            + '点地址栏<b>左侧</b>那个图标 → 选「允许此网站访问你的本地网络」<br>'
+            + '③ 还不行 → 双击包里的「自检.cmd」，它会直接告诉你哪一环不通</p>';
+        }
       }
       return;
     }
@@ -2131,6 +2247,7 @@ window.addEventListener('unhandledrejection', ev => {
 });
 loadHealth();
 if (state.token) { loadMeta().catch(() => {}); }
+loadHelperPort();
 probeServerCaps();
 ensurePickers();
 $('#stream-log').dataset.empty = '1';

@@ -323,6 +323,9 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": True, "running": running,
                     "pid": proc.pid if proc else None,
                     "server": STATE["server"],
+                    # ★ 报出自己的端口：网页拿它跟「网页设的端口」比对，
+                    #   对不上就提醒「你改了端口 → 重新下载启动包」。
+                    "port": STATE.get("port") or 0,
                     "server_alt": STATE.get("server_alt") or "",
                     "ticket_mode": bool(STATE.get("ticket")),
                     "has_jwt": bool(STATE.get("jwt")),
@@ -521,6 +524,35 @@ def main() -> int:
     ap.add_argument("--password", default="", help="成员密码（没票据时用）")
     ap.add_argument("--port", type=int, default=PORT, help="本地端口（默认 8766）")
     args = ap.parse_args()
+
+    # ★ 端口优先级（2026-10-24 用户要求「小助手端口可以自行设置」）：
+    #   ① 同目录的 helper-port.txt  ← **成员自己改这个文件就能换端口**
+    #   ② 命令行 --port（包里生成时写进去的）
+    #   ③ 默认 8766
+    #   为什么文件优先于命令行：成员改了端口后**不用改 cmd、不用重下包**；
+    #   而网页那边的端口也要改成一样（网页上「成员端工具」那里能改），
+    #   否则网页叫不到助手 → 界面上会明确提醒「重新下载启动包」。
+    here = os.path.dirname(os.path.abspath(__file__))
+    port = args.port
+    try:
+        pf = os.path.join(here, "helper-port.txt")
+        if os.path.exists(pf):
+            with open(pf, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    v = int(line)
+                    if 1024 <= v <= 65535:
+                        if v != port:
+                            print(f"[*] 按 helper-port.txt 使用端口 {v}"
+                                  f"（命令行给的是 {port}）")
+                        port = v
+                    break
+    except Exception:                                 # noqa: BLE001
+        pass
+    args.port = port
+    STATE["port"] = port
 
     # ★ 占位符（没被服务端替换过）当空处理 —— 否则会把
     #   "__MSYT_TICKET__" 这种字符串当成真票据传给 agent，白白失败一次。

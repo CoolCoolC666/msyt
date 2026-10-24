@@ -1678,6 +1678,60 @@ def _cf_service_token() -> tuple:
         return "", ""
 
 
+# ====================================================================== 小助手端口
+#: 成员端「本机小助手」在成员自己电脑上的监听端口（默认 8766）
+#: ★ 为什么要能改（2026-10-24 用户要求）：
+#:   8766 可能被别的软件占着（或公司电脑封了某些端口）→ 换一个。
+#:   设置存在**服务端**（`程序/data/helper-port.txt`），因为**下载的启动包要跟它同步**：
+#:   包里的「启动助手.cmd」会带上这个端口，网页也是用这个端口去呼叫它。
+DEFAULT_HELPER_PORT = 8766
+HELPER_PORT_FILE = Path(__file__).resolve().parent.parent / "data" / "helper-port.txt"
+
+
+def _helper_port() -> int:
+    """当前生效的小助手端口（读服务端设置，坏了就用默认值）。"""
+    try:
+        v = int(Path(HELPER_PORT_FILE).read_text(encoding="utf-8").strip())
+        if 1024 <= v <= 65535:
+            return v
+    except Exception:                                 # noqa: BLE001
+        pass
+    return DEFAULT_HELPER_PORT
+
+
+def _set_helper_port(port: int) -> int:
+    """保存小助手端口。返回实际生效的端口。"""
+    port = int(port)
+    if not (1024 <= port <= 65535):
+        raise HTTPException(400, "端口要在 1024~65535 之间")
+    Path(HELPER_PORT_FILE).parent.mkdir(parents=True, exist_ok=True)
+    Path(HELPER_PORT_FILE).write_text(str(port), encoding="utf-8")
+    return port
+
+
+@app.get("/api/agent/helper-port")
+def api_agent_helper_port(request: Request) -> Dict[str, Any]:
+    """小助手端口（**成员也能读** —— 网页要用它去呼叫成员本机的助手）。"""
+    _require_member(request)
+    p = _helper_port()
+    return {"port": p, "default": DEFAULT_HELPER_PORT}
+
+
+@app.post("/api/agent/helper-port")
+def api_agent_helper_port_set(request: Request,
+                              port: int = Body(..., embed=True)) -> Dict[str, Any]:
+    """改小助手端口（**管理员专属**）。
+
+    ★ 改完要提醒：**已经下载过包的成员需要重新下载一次**，
+      否则包里的「启动助手.cmd」用的还是旧端口，网页与本机对不上。
+    """
+    require_admin(request)
+    p = _set_helper_port(port)
+    return {"ok": True, "port": p,
+            "message": f"新下载的启动包会改用端口 {p}；"
+                       f"已经下载过包的成员需要**重新下载一次**才能对上。"}
+
+
 def _agent_api_base(request: Request) -> str:
     """agent 专用的 API 根地址。
 
@@ -1797,7 +1851,8 @@ def api_agent_bundle(request: Request) -> Response:
     data, filename = bundle.build_bundle(
         primary, ticket, str(pkg_dir),
         helper_src=str(pkg_dir / "msyt-helper.py"),
-        server_alt=alt)
+        server_alt=alt,
+        helper_port=_helper_port())
     return Response(
         content=data, media_type="application/zip",
         headers={"Content-Disposition":

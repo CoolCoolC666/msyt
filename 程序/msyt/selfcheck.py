@@ -164,14 +164,23 @@ def main() -> int:
         out("   没发现常见代理端口在监听")
     out()
 
-    # ---- ⑤ 本机助手 ----
-    out("⑤ 本机助手（网页要靠它才能启动 agent）")
+    # ---- ⑤ 本机助手（网页要靠它才能启动 agent）----
+    try:
+        from . import netdiag
+        hport = netdiag.local_helper_port()
+    except Exception:                                 # noqa: BLE001
+        try:
+            import netdiag                            # type: ignore
+            hport = netdiag.local_helper_port()
+        except Exception:                             # noqa: BLE001
+            hport = 8766
     try:
         import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:8766/status", timeout=4) as r:
-            out("   ✓ 助手在跑（127.0.0.1:8766）")
+        with urllib.request.urlopen(f"http://127.0.0.1:{hport}/status", timeout=4) as r:
+            out(f"   ✓ 助手在跑（127.0.0.1:{hport}）")
     except Exception:                                 # noqa: BLE001
-        out("   ✗ 助手没在跑 → 双击包里的「启动助手.cmd」")
+        out(f"   ✗ 助手没在跑（127.0.0.1:{hport}）→ 双击包里的「启动助手.cmd」")
+        out(f"     （端口在包里的 helper-port.txt 里改；网页那边也要用同一个端口）")
     out()
 
     # ---- 结论 ----
@@ -181,7 +190,7 @@ def main() -> int:
     helper_up = False
     try:
         import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:8766/status", timeout=4):
+        with urllib.request.urlopen(f"http://127.0.0.1:{hport}/status", timeout=4):
             helper_up = True
     except Exception:                                 # noqa: BLE001
         helper_up = False

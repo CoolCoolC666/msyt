@@ -68,8 +68,14 @@ README = """民生e点通 · 成员端协作采集启动包
     换账号了才需要重新下载（新包里的凭证跟着新账号走）。
 
 【不想用包里的凭证？用另一个文件】
-  双击「启动助手.cmd」→ 它会在本机开一个「助手」（127.0.0.1:8766），
+  双击「启动助手.cmd」→ 它会在本机开一个「助手」（127.0.0.1:{HELPER_PORT}），
   之后回到网页点一下「启动本机 agent」就行，网页里还能看到本机 agent 的实时日志。
+
+【想换端口？改一个文件就行】
+  打开同目录的 `helper-port.txt`，把第一行的数字改成你要用的端口，保存，
+  然后关掉助手窗口、重新双击「启动助手.cmd」。
+  ★ 网页那边也要用同一个端口（网页上「成员端工具」那里能改），
+    两边对不上，网页就叫不到助手了 —— 最省事：回网页重新下载一次启动包。
 
 【为什么 agent 用的是另一个网址】
   包里的 `--server` 指向 `agentapi.…`（**专用子域名**），不是网页那个域名。
@@ -126,7 +132,8 @@ def _code_build() -> str:
 def build_bundle(server: str, ticket: str, msyt_dir: str,
                  helper_src: str = "",
                  cf_id: str = "", cf_secret: str = "",
-                 server_alt: str = "") -> Tuple[bytes, str]:
+                 server_alt: str = "",
+                 helper_port: int = 8766) -> Tuple[bytes, str]:
     """生成启动包。返回 (zip 字节, 文件名)。
 
     `server`：**主用**控制面地址（由调用方从请求里推导 ——
@@ -214,7 +221,7 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
             "python -c \"import requests,bs4\" >nul 2>nul || (",
             "  python -m pip install --disable-pip-version-check -q requests beautifulsoup4",
             ")",
-            "echo starting local helper on 127.0.0.1:8766 ...",
+            "echo starting local helper on 127.0.0.1:" + str(helper_port) + " ...",
             "echo (go back to the web page and click the start button)",
             "echo.",
             "echo [If the web page says \"no local helper detected\"]",
@@ -226,9 +233,19 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
             "echo   - Or double-click the self-check file to see what is blocked.",
             "echo.",
             "python msyt-helper.py --server " + server
-            + ((" --server-alt " + server_alt) if server_alt else ""),
+            + ((" --server-alt " + server_alt) if server_alt else "")
+            + " --port " + str(helper_port),
             "pause",
         ]))
+        # ★ 包里的**端口配置**：成员想自己换端口时，**只改这一个文件**就行，
+        #   不用改 cmd、不用重新下载包。助手启动时优先读它。
+        z.writestr("helper-port.txt",
+                   f"{int(helper_port)}\n"
+                   "# 小助手在你本机监听的端口（网页也用这个端口来呼叫它）。\n"
+                   "# 想换一个端口：改上面这个数字 → 保存 → 关掉助手窗口 → 重新双击\n"
+                   "# 「启动助手.cmd」。\n"
+                   "# ⚠ 只改本机端口的话，网页那边的端口也要改成一样，否则网页叫不到它。\n"
+                   "#   最省事的办法：回网页把端口改成这个数，或重新下载一次启动包。\n")
 
         # ---- 2b. 自检.cmd：双击就能诊断「到底哪一环不通」 ----
         #   ★ 为什么必须有（2026-10-23 晚上组员实测）：
@@ -258,12 +275,14 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                 z.writestr("msyt-helper.py", f.read())
 
         # ---- 4. 说明 ----
-        z.writestr("说明.txt", README +
+        z.writestr("说明.txt", README.replace("{HELPER_PORT}", str(helper_port)) +
                    "\n\n控制面地址（下载时按「你此刻访问的地址 + 服务器部署配置」生成）：\n"
                    "    主用：" + server + "\n" +
                    ("    备用：" + server_alt + "\n"
                     "    （agent 启动时会自己探一下，主地址不通就换备用）\n"
-                    if server_alt else ""))
+                    if server_alt else "")
+                   + "\n本机小助手端口：" + str(helper_port)
+                   + "（网页也用这个端口呼叫它；想改就改 helper-port.txt）\n")
         z.writestr("server.txt", server + "\n")
         if server_alt:
             z.writestr("server-alt.txt", server_alt + "\n")

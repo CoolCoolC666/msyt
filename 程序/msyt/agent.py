@@ -338,13 +338,19 @@ class Agent:
                        "（若 Edge 能打开而这里不通，请手动指定代理："
                        "启动采集.cmd 里加 --proxy http://127.0.0.1:端口）")
 
-        # ⑤ 本机助手
+        # ⑤ 本机助手（端口可能是成员自己改过的）
+        try:
+            from . import netdiag
+            hport = netdiag.local_helper_port()
+        except Exception:                             # noqa: BLE001
+            hport = 8766
         try:
             import urllib.request
-            with urllib.request.urlopen("http://127.0.0.1:8766/status", timeout=4) as r:
-                out.append(f"  ⑤ 本机助手（127.0.0.1:8766）：✓ 在跑")
+            with urllib.request.urlopen(f"http://127.0.0.1:{hport}/status",
+                                        timeout=4) as r:
+                out.append(f"  ⑤ 本机助手（127.0.0.1:{hport}）：✓ 在跑")
         except Exception:                             # noqa: BLE001
-            out.append("  ⑤ 本机助手（127.0.0.1:8766）：✗ 没在跑"
+            out.append(f"  ⑤ 本机助手（127.0.0.1:{hport}）：✗ 没在跑"
                        "（双击「启动助手.cmd」）")
         return out
 

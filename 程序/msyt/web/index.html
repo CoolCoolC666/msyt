@@ -159,7 +159,7 @@
       </div>
       <ol style="margin:8px 0 0 18px">
         <li>点下面的<b>「下载成员端启动包」</b>，解压到你自己电脑上。</li>
-        <li>双击包里的 <code>启动助手.cmd</code> —— 它会在你本机开一个 127.0.0.1:8766 的小助手
+        <li>双击包里的 <code>启动助手.cmd</code> —— 它会在你本机开一个 127.0.0.1:<span class="hp">8766</span> 的小助手
           （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。</li>
         <li>回到这个网页，点 <b>「启动本机 agent」</b>，输入邮箱和密码。</li>
         <li>本机 Agent 变成「运行中」之后，再回来点「开始采集」。</li>
@@ -181,9 +181,19 @@
         <button class="ghost" id="btn-helper-stop">停止本机 agent</button>
         <span class="hint" id="helper-msg"></span>
       </div>
+      <div class="row">
+        <label class="hint" for="helper-port">小助手端口</label>
+        <input id="helper-port" type="number" min="1024" max="65535" step="1" style="width:110px">
+        <button class="ghost" id="btn-helper-port-save">保存到本机</button>
+        <button class="ghost" id="btn-helper-port-default" title="设为服务器默认：以后新下载的启动包都用这个端口">设为服务器默认</button>
+        <span class="hint" id="helper-port-msg"></span>
+      </div>
       <p class="hint">「启动本机 agent」需要你先双击启动包里的 <code>启动助手.cmd</code>：
-        它会在本机开一个 127.0.0.1:8766 的小助手，网页才能呼叫它
-        （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。</p>
+        它会在本机开一个 127.0.0.1:<span class="hp">8766</span> 的小助手，网页才能呼叫它
+        （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。<br>
+        ★ 端口被占用或被公司电脑封了？改上面的端口就行：
+        <b>本机</b>改这里，<b>包</b>里改 <code>helper-port.txt</code>（或在网页上「设为服务器默认」后重新下载一次包）——
+        <b>两边要一样</b>，网页才叫得到助手。</p>
       <div class="logbox" id="helper-log"><p class="hint">本机 agent 的实时日志（还没启动）</p></div>
     </div>
     <div class="grid2">
