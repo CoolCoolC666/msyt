@@ -66,6 +66,126 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g,
 
 const num = n => (n ?? 0).toLocaleString('zh-CN');
 
+/* ---------------------------------------------------------------- 日志视图
+   ★ 为什么要有（用户 2026-10-24 反馈：「日志过多的情况下有一定的卡顿问题」）
+     原来的做法：每次轮询（3 秒）把**整块**日志 innerHTML 重写一遍。
+     日志一多 → DOM 节点多 + 反复重建 → 明显卡顿。
+   ★ 现在的做法：
+     · 内存里保留**全部**行（上限 2000，多的丢最旧 —— 那是助手缓冲区的大小）
+     · **DOM 里最多渲染 500 行**（用户要求），并且**分页**（每页 100 行）
+     · 分页条上能「上一页 / 下一页 / 跳到最新」；翻到旧页就**不自动跳回**最新
+     · 只有内容真的变了才重绘（签名比对）
+     · 页面不可见（切到别的页签）时**暂停轮询**，不做无用功
+*/
+const LOG_KEEP = 2000;        // 内存里最多留多少行
+const LOG_DOM_MAX = 500;      // DOM 里最多渲染多少行（用户要求）
+const LOG_PAGE_SIZE = 100;    // 每页多少行
+
+function makeLogView(sel, opts) {
+  // sel 可以是**一个**选择器，也可以是**一组**（同一份日志显示在两个框里）
+  const sels = Array.isArray(sel) ? sel : [sel];
+  const boxes = sels.map(s => $(s)).filter(Boolean);
+  if (!boxes.length) return null;
+  const box = boxes[0];
+  const o = Object.assign({
+    keep: LOG_KEEP, domMax: LOG_DOM_MAX, pageSize: LOG_PAGE_SIZE,
+    empty: '（还没有日志）',
+  }, opts || {});
+  let lines = [];        // 全部行（html 字符串）
+  let head = '';         // 头部（状态条）
+  let page = 0;          // 当前页
+  let follow = true;     // 是否跟随最新
+  let sig = '';          // 内容签名（变了才重绘）
+
+  const mkBtn = (t) => {
+    const b = document.createElement('button');
+    b.className = 'ghost tiny';
+    b.textContent = t;
+    return b;
+  };
+  const pager = document.createElement('div');
+  pager.className = 'log-pager';
+  const bPrev = mkBtn('‹ 上一页');
+  const info = document.createElement('span');
+  info.className = 'dim';
+  const bNext = mkBtn('下一页 ›');
+  const bTail = mkBtn('跳到最新');
+  pager.append(bPrev, info, bNext, bTail);
+  // ★ 状态条单独放一个框：它每 3 秒都在变（已领/已完成），
+  //   如果跟正文写在一起 → 每 3 秒把 100 行正文也重绘一遍（白费力气）。
+  const headBox = document.createElement('div');
+  headBox.className = 'log-head';
+  box.parentNode.insertBefore(headBox, box);
+  box.parentNode.insertBefore(pager, box);
+
+  const pages = () => Math.max(1, Math.ceil(lines.length / o.pageSize));
+
+  const render = () => {
+    const tp = pages();
+    if (page > tp - 1) page = tp - 1;
+    if (page < 0) page = 0;
+    const start = page * o.pageSize;
+    const slice = lines.slice(start, start + o.pageSize);
+    // 状态条单独更新（它最常变）；正文只在内容真的变了才重绘
+    if (headBox.innerHTML !== head) headBox.innerHTML = head;
+    const body = slice.length ? slice.join('\n')
+      : `<span class="dim">${esc(o.empty)}</span>`;
+    boxes.forEach(b => {
+      if (b.innerHTML !== body) {
+        b.innerHTML = body;
+        b.scrollTop = b.scrollHeight;
+      }
+    });
+    info.textContent = lines.length
+      ? `第 ${page + 1} / ${tp} 页 · 共 ${lines.length} 行`
+      : '还没有日志';
+    bPrev.disabled = page <= 0;
+    bNext.disabled = page >= tp - 1;
+    bTail.disabled = follow && page >= tp - 1;
+  };
+
+  bPrev.onclick = () => { follow = false; page = Math.max(0, page - 1); render(); };
+  bNext.onclick = () => { follow = false; page = Math.min(pages() - 1, page + 1); render(); };
+  bTail.onclick = () => { follow = true; page = pages() - 1; render(); };
+
+  return {
+    /** 整份替换（轮询拿到的完整日志）。正文没变就不重绘。 */
+    set(allLines, headHtml) {
+      const a = allLines || [];
+      const s = `${a.length}|${a[a.length - 1] || ''}`;
+      const headChanged = (head || '') !== (headHtml || '');
+      if (s === sig) {
+        // 正文没变：只更新状态条（数字在变）
+        if (headChanged) { head = headHtml || ''; render(); }
+        return;
+      }
+      sig = s;
+      lines = a.slice(-o.keep);
+      head = headHtml || '';
+      if (follow) page = pages() - 1;
+      render();
+    },
+    /** 追加一行（流式日志）。 */
+    append(lineHtml) {
+      lines.push(lineHtml);
+      if (lines.length > o.keep) lines = lines.slice(-o.keep);
+      sig = '';
+      if (follow) page = pages() - 1;
+      render();
+    },
+    /** 清空。 */
+    clear(text) {
+      lines = []; head = ''; sig = ''; page = 0; follow = true;
+      headBox.innerHTML = '';
+      boxes.forEach(b => {
+        b.innerHTML = `<p class="hint">${esc(text || '等待日志…')}</p>`;
+      });
+      info.textContent = '还没有日志';
+      bPrev.disabled = bNext.disabled = bTail.disabled = true;
+    },
+  };
+}
+
 function lightBadge(code, name) {
   const c = ['green', 'yellow', 'grey', 'warn'].includes(code) ? code : 'none';
   return `<span class="badge ${c}">${esc(name || code || '未点亮')}</span>`;
@@ -1196,8 +1316,7 @@ async function loadJobs() {
 
 async function showJobLog(jid) {
   try {
-    const j = await api('/api/jobs/' + jid + '?tail=400');
-    const box = $('#job-log');
+    const j = await api('/api/jobs/' + jid + '?tail=500');
     const head = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <b>${esc(KIND_CN[j.kind] || j.kind)} · ${esc(j.id)}</b>
         <span class="dim">${esc(j.state)} · 用时 ${j.elapsed}s${j.error ? ' · ' + esc(j.error) : ''}</span>
@@ -1208,17 +1327,19 @@ async function showJobLog(jid) {
       if (/✗|失败|不一致|错误/.test(l.m)) cls = 'bad';
       else if (/✓|完成|结束|命中/.test(l.m)) cls = 'ok';
       return `<span class="t">${t}</span><span class="${cls}">${esc(l.m)}</span>`;
-    }).join('\n');
+    });
     const extra = j.result
       ? `<div class="okbox" style="margin:10px 0 0">结果：${esc(JSON.stringify(j.result))}</div>` : '';
-    box.innerHTML = head + (lines || '<span class="dim">（还没有日志）</span>') + extra;
-    box.scrollTop = box.scrollHeight;
+    // ★ 用日志视图（最多 500 行 + 分页），不再整块重绘（2026-10-24）
+    logJob.set(lines, head + extra);
   } catch (e) { /* 任务可能已被清理 */ }
 }
 
 function pollJobs() {
   if (state.jobTimer) clearInterval(state.jobTimer);
   state.jobTimer = setInterval(async () => {
+    // ★ 页面不可见时不轮询（2026-10-24：日志多时卡顿的主因之一）
+    if (document.hidden) return;
     try {
       const r = await api('/api/jobs');
       const running = (r.items || []).filter(j => j.state === 'running');
@@ -1963,6 +2084,14 @@ $('#btn-helper-stop').onclick = async () => {
 
 let _helperTimer = null;
 let _helperFails = 0;
+//: 本机 agent 的日志视图（两个框共用一份内容：成员端工具卡 + 本机 agent 卡）
+const logHelper = makeLogView(['#helper-log', '#local-agent-log'], {
+  empty: '（还没有日志）',
+});
+//: 任务运行情况的日志视图
+const logJob = makeLogView('#job-log', { empty: '（还没有日志）' });
+//: 采集日志（服务器流式推送）的日志视图
+const logStream = makeLogView('#stream-log', { empty: '等待日志…' });
 async function pollHelper() {
   if (_helperTimer) clearInterval(_helperTimer);
   const box = $('#helper-log');
@@ -1970,6 +2099,8 @@ async function pollHelper() {
   //   原来只有 setInterval(3000)，用户进页面要等 3 秒才看到「本机 Agent 运行中」，
   //   徽章一直停在「正在探测…」—— 而这 3 秒正是他判断「能不能开工」的时候。
   const once = async () => {
+    // ★ 页面不可见时**别轮询**（2026-10-24：日志多的时候卡顿的主因之一）
+    if (document.hidden) return;
     let r;
     try {
       r = await helperCall('/status');
@@ -1983,17 +2114,19 @@ async function pollHelper() {
         _helperTimer = null;
         // ★ 端口对不上是很常见的一种「没检测到」→ 先去别的端口探一下
         const found = await probeOtherPorts();
-        if (found) {
-          box.innerHTML = '<p class="hint"><b>端口对不上</b><br>'
-            + esc(helperPortMismatchText(found)) + '</p>';
-        } else {
-          box.innerHTML = '<p class="hint"><b>没检测到本机助手（127.0.0.1:'
+        const tip = found
+          ? '<p class="hint"><b>端口对不上</b><br>'
+            + esc(helperPortMismatchText(found)) + '</p>'
+          : '<p class="hint"><b>没检测到本机助手（127.0.0.1:'
             + HELPER_PORT + '）</b><br>'
             + '① 双击包里的「启动助手.cmd」<br>'
             + '② 助手窗口已经在跑却还报这个 → 多半是 <b>Edge 拦了「本地网络访问」</b>：'
             + '点地址栏<b>左侧</b>那个图标 → 选「允许此网站访问你的本地网络」<br>'
             + '③ 还不行 → 双击包里的「自检.cmd」，它会直接告诉你哪一环不通</p>';
-        }
+        // 两个框都要显示（成员在哪儿都能看到）
+        [$('#helper-log'), $('#local-agent-log')].forEach(b => {
+          if (b) b.innerHTML = tip;
+        });
       }
       return;
     }
@@ -2049,19 +2182,11 @@ async function pollHelper() {
         + (idle !== null ? ' · 最后活动 ' + ago(idle) + '：' : '　')
         + (r.log && r.log.length ? esc(r.log[r.log.length - 1].m) : '') + '</div>';
     }
-    box.innerHTML = head + (lines.length ? lines.join('\n')
-      : '<span class="dim">（还没有日志）</span>');
-    box.scrollTop = box.scrollHeight;
-    // ★ 同一份状态与日志**也**送到「本机 agent」那块（2026-10-24 用户要求：
-    //   「这个应当在组员的 Agent 运行并且传输日志」）。
-    //   成员是盯着自己点的那个按钮找反馈的 —— 日志只写在上面那张
-    //   「成员端工具」卡里，他看不见，就等于「没反应」。
-    const lbox = $('#local-agent-log');
-    if (lbox) {
-      lbox.innerHTML = head + (lines.length ? lines.join('\n')
-        : '<span class="dim">（还没有日志）</span>');
-      lbox.scrollTop = lbox.scrollHeight;
-    }
+    // ★ 用日志视图渲染（2026-10-24）：DOM 里最多 500 行 + 分页，
+    //   而且**只在内容变了才重绘** —— 原来每 3 秒整块 innerHTML 重建，日志一多就卡。
+    //   同一个组件管两个框（「成员端工具」那张卡 + 「本机 agent」那张卡），
+    //   成员在哪儿都能看到同一份日志。
+    logHelper.set(lines, head);
     const lstate = $('#local-agent-state');
     if (lstate) {
       const lastLine = (r.log && r.log.length)
@@ -2444,23 +2569,19 @@ function startStream() {
 }
 
 function appendStream(r) {
-  const box = $('#stream-log');
-  if (box.dataset.empty === '1') { box.innerHTML = ''; box.dataset.empty = '0'; }
-  const line = document.createElement('div');
-  line.className = 'stream-line';
   const t = new Date(r.t * 1000).toLocaleTimeString('zh-CN');
-  line.innerHTML = `<span class="t">${t}</span>`
+  // ★ 用日志视图（2026-10-24）：内存留 2000 行、DOM 只渲染 500 行 + 分页，
+  //   不再每来一条就 appendChild + removeChild(firstChild) —— 那是**卡顿**的来源。
+  logStream.append(
+    `<div class="stream-line">`
+    + `<span class="t">${t}</span>`
     + `<span class="node">${esc(r.node)}</span>`
     + (r.task ? `<span class="task">${esc(r.task)}</span>` : '')
-    + `<span class="m ${esc(r.level || 'info')}">${esc(r.m)}</span>`;
-  box.appendChild(line);
-  while (box.children.length > 600) box.removeChild(box.firstChild);
-  box.scrollTop = box.scrollHeight;
+    + `<span class="m ${esc(r.level || 'info')}">${esc(r.m)}</span>`
+    + `</div>`);
 }
 $('#btn-st-clear').onclick = () => {
-  const box = $('#stream-log');
-  box.innerHTML = '<p class="hint">等待日志…</p>';
-  box.dataset.empty = '1';
+  logStream.clear('等待日志…');
 };
 $('#st-all').onchange = () => { /* 过滤在 onmessage 里做 */ };
 

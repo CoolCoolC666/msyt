@@ -67,7 +67,7 @@ TICKET = "__MSYT_TICKET__"
 PORT = 8766
 STATE = {
     "proc": None,
-    "log": deque(maxlen=400),
+    "log": deque(maxlen=2000),
     "started_at": 0.0,
     "server": SERVER,
     "server_alt": "",     # ★ 备用控制面地址（2026-10-23：包带主/备两个）
@@ -341,7 +341,8 @@ class Handler(BaseHTTPRequestHandler):
                     "stat_restricted": int(STATE.get("stat_restricted") or 0),
                     "uptime": round(time.time() - STATE["started_at"], 1)
                     if STATE["started_at"] else 0,
-                    "log": list(STATE["log"])[-80:]}
+                    # ★ 一次给 500 行（网页上最多渲染 500 行 + 分页，2026-10-24）
+                    "log": list(STATE["log"])[-500:]}
 
     def start(self, body=None):
         """启动 agent。
