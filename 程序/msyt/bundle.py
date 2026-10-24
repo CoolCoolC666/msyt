@@ -183,8 +183,12 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
             "echo     Use the same account you log in with on the website.",
             "echo.",
             "echo     [If it says ConnectionError / cannot reach the server]",
-            "echo      -> run the self-check file in this folder to see what is blocked.",
-            "echo      -> or try: python -m msyt agent --server " + server + " --diagnose",
+            # ★ 提示行里**绝不能出现 "->"**：cmd.exe 把 ">" 当输出重定向符！
+            #   "echo   -> run xxx" 会把提示语写进一个叫 "run" 的文件（垃圾文件），
+            #   而行尾的 "->"（> 后面没文件名）直接报
+            #   "The syntax of the command is incorrect." → 批处理中断 → 窗口秒关（闪退）。
+            "echo      - run the self-check file in this folder to see what is blocked.",
+            "echo      - or try: python -m msyt agent --server " + server + " --diagnose",
             "echo.",
         ] + (["echo     alt    = " + server_alt,
               "echo     (the agent probes both and picks whichever answers)"]
@@ -214,10 +218,12 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
             "echo (go back to the web page and click the start button)",
             "echo.",
             "echo [If the web page says \"no local helper detected\"]",
-            "echo   -> Edge may be blocking \"local network access\".",
-            "echo   -> Click the icon at the LEFT of the address bar ->",
+            # ★ 同上：这里原来用的是 "->"，是启动助手.cmd 闪退的真凶
+            #   （行尾那个 "->" 让 cmd 报语法错并中断批处理）。
+            "echo   - Edge may be blocking \"local network access\".",
+            "echo   - Click the icon at the LEFT of the address bar,",
             "echo      \"Allow this site to access your local network\".",
-            "echo   -> Or double-click the self-check file to see what is blocked.",
+            "echo   - Or double-click the self-check file to see what is blocked.",
             "echo.",
             "python msyt-helper.py --server " + server
             + ((" --server-alt " + server_alt) if server_alt else ""),
