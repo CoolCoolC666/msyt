@@ -358,7 +358,8 @@ def cmd_agent(args) -> int:
                heartbeat=args.heartbeat, fail_limit=args.fail_limit,
                token=args.token or "", ticket=args.ticket or "",
                server_alt=args.server_alt or "", proxy=args.proxy or "",
-               net_wait_minutes=int(getattr(args, "net_wait", 20) or 0))
+               net_wait_minutes=int(getattr(args, "net_wait", 20) or 0),
+               workers=int(getattr(args, "workers", 1) or 1))
     # ---- 本机自主采集模式（不领协作活，采完就退）----
     _tids = [int(x) for x in (args.tids or "").replace("，", ",").split(",")
              if str(x).strip().isdigit()]
@@ -546,6 +547,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--net-wait", type=int, default=20,
                     help="网络不通时等多久再放弃（分钟，默认 20；0=不等直接退出）。"
                          "等待期间程序不退出，网络恢复后自动接上")
+    sp.add_argument("--workers", type=int, default=1,
+                    help="并发采集的线程数（默认 1=串行）。"
+                         "并发单位是「一帖」不是「一个请求」（同帖的详情页→ajax "
+                         "必须贴在一起，站方 token 有效期 <30 秒）。"
+                         "实测 2026-10-25：1 路 0 异常约 6.2 万帖/天，"
+                         "3 路 0 异常约 12.3 万帖/天（最优点），"
+                         "5 路出现连接错误、吞吐反降 —— 建议不超过 3")
     # ---- 本机自主采集（2026-10-23 新增）----
     #   成员要在**自己机器**上采指定的部门/帖子，采完回传服务器。
     #   ★ 为什么必须走本机：站方不提供 CORS，浏览器不能直采；

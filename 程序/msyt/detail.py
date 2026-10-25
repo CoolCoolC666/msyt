@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -138,9 +139,39 @@ class DetailCollector:
             #   「page1 没取到 token」这种看不出真相的报错。
             notice = parse_site_notice(html)
             if notice:
-                restricted = notice
-                last_error = notice
-                break
+                # ★★ **必须复验**（2026-10-25 加）
+                #   站方会**间歇性**返回「提示信息」页（实测：并发/密集访问时出现，
+                #   同样的帖单独再请求一次又是正常的）。
+                #   如果直接采信，就会把**明明可见**的帖判成「站方限制」——
+                #   而这个状态是**终态**（队列里摘出去、还写进正文当标记），
+                #   一次瞬时异常 = 永久误标 = 数据污染。
+                #   → 复验：再请求一次同 URL；能拿到楼层/token → 是临时故障，不是限制。
+                v_url = THREAD_URL.format(tid=tid, page=page_no)
+                try:
+                    html2 = self.client.get(v_url, referer=v_url).text
+                except HttpError as e2:
+                    html2 = ""
+                    self.db.log("detail", str(tid), "restricted_retry_err", False, str(e2))
+                if html2 and not parse_site_notice(html2):
+                    tp2 = parse_thread_page(html2, tid=tid, page_no=page_no)
+                    if tp2.token and tp2.pids:
+                        # 复验通过 → **不是**站方限制，是临时故障
+                        html = html2
+                        tp = tp2
+                        last_error = (f"首次请求返回提示页（疑似临时故障），"
+                                      f"复验后正常取得 {len(tp2.pids)} 层")
+                        self.db.log("detail", str(tid), "notice_flaky", True,
+                                    last_error)
+                    else:
+                        restricted = notice
+                        last_error = notice
+                        self._note_restricted_evidence(tid, html, page_no, "复验也不正常")
+                        break
+                else:
+                    restricted = notice
+                    last_error = notice
+                    self._note_restricted_evidence(tid, html, page_no, "复验仍是提示页")
+                    break
 
             tp = parse_thread_page(html, tid=tid, page_no=page_no)
             if not tp.token:
@@ -363,13 +394,26 @@ class DetailCollector:
 
     # ------------------------------------------------------------------
     def run(self, limit: int = 0, max_attempts: int = 3,
-            should_stop=None) -> Dict:
+            should_stop=None, workers: int = 1) -> Dict:
         """从队列里连续取帖采。先旧后新。
 
         `should_stop`：可选回调，返回 True 则**在下一帖之前**停下。
         Web 前端用它实现"随时停止"。默认 None = 跑到队列空（原有行为不变）。
+
+        `workers`：并发线程数（2026-10-25 加）。**并发单位是一帖**，
+        不是「一个请求」—— 同帖的「详情页 → ajax」必须贴在一起
+        （站方 token 有效期 < 30 秒，中间插入任何 sleep 都会失败）。
+        ★ `workers <= 1` 走**原串行路径**，行为与并发改造前逐条一致。
         """
         self.db.reset_stale_running()
+        n = max(1, int(workers or 1))
+        if n == 1:
+            return self._run_serial(limit, max_attempts, should_stop)
+        return self._run_parallel(limit, max_attempts, should_stop, n)
+
+    # ------------------------------------------------------------------
+    def _run_serial(self, limit: int, max_attempts: int, should_stop) -> Dict:
+        """串行采集（**默认路径**，与并发改造前行为逐条一致）。"""
         done = failed = restricted = 0
         stopped = False
         t_start = time.time()
@@ -408,6 +452,178 @@ class DetailCollector:
                         f"失败 {failed} 帖，用时 {el:.0f}s")
         return {"done": done, "failed": failed, "restricted": restricted,
                 "elapsed": round(el, 1), "stopped": stopped}
+
+    # ------------------------------------------------------------------
+    def _run_parallel(self, limit: int, max_attempts: int, should_stop,
+                      workers: int) -> Dict:
+        """并发采集（每个 worker 一条线）。
+
+        ★ 三条并发安全的前提（缺一不可）
+          ① **领活互斥**：`claim_next_detail()` 在 `with self.lock:` 里，
+             而 db.DB 的写锁是**进程级共享**的 → 两个 worker 领不到同一条。
+          ② **写库串行**：所有写操作同样走那把共享锁 → 不会出现
+             "database is locked"，也不会把读事务升级为写。
+          ③ **每 worker 自己的连接与客户端**：
+             sqlite3 的连接**不能跨线程**（check_same_thread 默认开），
+             requests.Session 也不是线程安全的，
+             而且限速状态是**实例级**的 → 每线程独立，
+             限速才不会被别的线程"搭便车"绕过。
+        """
+        state = {"done": 0, "failed": 0, "restricted": 0, "picked": 0}
+        lock = threading.Lock()
+        stopped = False
+        t_start = time.time()
+        self.client.log(f"[detail] 并发采集启动：{workers} 路"
+                        f"（每路独立限速 {self.cfg.interval}s）")
+
+        def _worker() -> None:
+            nonlocal stopped
+            dc = self.for_thread()
+            db = dc.db
+            while True:
+                if should_stop is not None and should_stop():
+                    with lock:
+                        stopped = True
+                    return
+                # ★ 限额要**原子地预占**，不能「先查后领」——
+                #   多个 worker 同时查到「还没满」→ 一起领 → 采出 limit+几个帖
+                #   （实测 6 帖的限额采出了 8 帖）。
+                with lock:
+                    if limit and state["picked"] >= limit:
+                        return
+                    state["picked"] += 1
+                try:
+                    item = db.claim_next_detail()
+                except Exception as e:                    # noqa: BLE001
+                    with lock:
+                        state["picked"] -= 1
+                    self.client.log(f"[detail] 领活失败：{e}")
+                    return
+                if item is None:
+                    with lock:
+                        state["picked"] -= 1      # 没领到 → 归还名额
+                    return
+                tid = item["tid"]
+                try:
+                    res = dc.collect_one(
+                        tid, pages_done=item.get("pages_done") or 0,
+                        pages_total=item.get("pages_total") or 0,
+                        max_attempts=max_attempts, should_stop=should_stop)
+                except Exception as e:                    # noqa: BLE001
+                    with lock:
+                        state["failed"] += 1
+                    self.client.log(f"[detail] tid={tid} ✗ 采集中断：{e}")
+                    continue
+                # ① 计数（锁内，且**不**在锁内做库写入 —— 避免锁嵌套）
+                with lock:
+                    if res.get("ok"):
+                        state["done"] += 1
+                        kind = "ok"
+                    elif res.get("restricted"):
+                        state["restricted"] += 1
+                        kind = "restricted"
+                    else:
+                        state["failed"] += 1
+                        kind = "failed"
+                # ② 状态落库（db 自己的共享写锁 → 串行、线程安全）
+                if kind == "restricted":
+                    db.set_detail_state(tid, "restricted", res.get("reason", ""))
+                    msg = (f"[detail] tid={tid} ⊘ 站方限制：{res.get('reason')}"
+                           f"（已标记，不计入已采详情帖）")
+                elif kind == "failed":
+                    db.set_detail_state(tid, "failed", res.get("error", ""))
+                    db.set_thread_detail(tid, detail_state="failed")
+                    msg = f"[detail] tid={tid} ✗ {res.get('error')}"
+                else:
+                    msg = (f"[detail] tid={tid} ✓ {res['pages']} 页 / "
+                           f"{res['posts']} 楼 / {res['chars']} 字")
+                # ③ 打日志（锁外，避免长时间持锁）
+                self.client.log(msg)
+
+        threads = []
+        for i in range(workers):
+            th = threading.Thread(target=_worker, name=f"detail-{i + 1}",
+                                  daemon=True)
+            th.start()
+            threads.append(th)
+        try:
+            for th in threads:
+                th.join()
+        except KeyboardInterrupt:
+            stopped = True
+            self.client.log("[detail] 收到中断，等各路收尾…")
+            for th in threads:
+                th.join(timeout=10)
+        el = time.time() - t_start
+        done, failed = state["done"], state["failed"]
+        restricted = state["restricted"]
+        self.client.log(f"[detail] 完成 {done} 帖（{workers} 路并发），"
+                        f"站方限制 {restricted} 帖，失败 {failed} 帖，用时 {el:.0f}s")
+        return {"done": done, "failed": failed, "restricted": restricted,
+                "elapsed": round(el, 1), "stopped": stopped, "workers": workers}
+
+    # ------------------------------------------------------------------
+    _tls = threading.local()
+
+    def for_thread(self) -> "DetailCollector":
+        """给「当前线程」用的采集器：**独立 client + 独立 DB 连接**。
+
+        ★ 为什么要独立（2026-10-25 并发改造）
+          · `requests.Session` **不是线程安全的**（连接池会被并发搅乱）
+          · 限速状态（`_last_obj`）是**实例级**的 → 共用会让限速互相干扰，
+            甚至出现「限速被绕过」（另一个线程刚请求过就把时间戳刷新了）
+          · sqlite3 的连接**不能跨线程**（check_same_thread 默认开）
+        """
+        cached = getattr(self._tls, "collectors", None)
+        if cached is None:
+            cached = {}
+            self._tls.collectors = cached
+        key = str(self.db.path)
+        c = cached.get(key)
+        if c is None:
+            c = DetailCollector(self._worker_db(),
+                                Client(self.cfg, verbose=False), self.cfg)
+            cached[key] = c
+        return c
+
+    def _worker_db(self) -> DB:
+        """worker 自己的 DB 连接（2026-10-25 加）。
+
+        ★ 为什么不能共用一个 DB 实例
+          sqlite3 的连接**默认不允许跨线程**（check_same_thread=True），
+          两个 worker 共用一条连接会直接抛 ProgrammingError。
+        ★ 为什么并发写仍然安全
+          db.DB 的写锁是**进程级共享**的（见 db.DB 类注释）：
+          多条连接 → 同一把锁 → 写事务真正串行化。
+        """
+        key = str(self.db.path)
+        cached = getattr(self._tls, "dbs", None)
+        if cached is None:
+            cached = {}
+            self._tls.dbs = cached
+        db = cached.get(key)
+        if db is None:
+            db = DB(key)
+            cached[key] = db
+        return db
+
+    # ------------------------------------------------------------------
+    def _note_restricted_evidence(self, tid: int, html: str, page_no: int,
+                                  why: str) -> None:
+        """受限判定时**留证**：把提示页的特征记进 fetch_log。
+
+        ★ 为什么要留证
+          「站方限制」是**终态**（队列里摘出去 + 正文写标记 + 不计入已采详情帖），
+          判错的代价很大（把明明可见的帖永久误标）→ 必须能事后复查。
+          记下：字节数 / 标题 / 楼层锚点数 / 复验结论。
+        """
+        import re as _re
+        m = _re.search(r"<title>(.*?)</title>", html or "", _re.S)
+        title = (m.group(1).strip() if m else "?")[:120]
+        n_anchor = len(_re.findall(r'id="post_\d+"', html or ""))
+        self.db.log("detail", str(tid), "restricted_evidence", False,
+                    f"page={page_no} {why} 字节={len(html or '')} "
+                    f"楼层锚点={n_anchor} title={title!r}")
 
     # ------------------------------------------------------------------
     def _expected_posts(self, tid: int) -> int:

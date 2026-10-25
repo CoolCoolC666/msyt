@@ -129,6 +129,18 @@ def _code_build() -> str:
         return "0"
 
 
+#: 启动包里的 agent 默认**并发数**（2026-10-25 加）
+#:
+#: ★ 为什么是 3
+#:   实测（2026-10-25，真实请求对，5 个档位逐级加压）：
+#:     1 路 0 异常 ≈ 61,700 帖/天   2 路 0 异常 ≈ 96,000
+#:     3 路 0 异常 ≈ 123,000  ← 最优点（产能翻倍且零异常）
+#:     5 路 出现 network 错误、吞吐反降
+#:   → 3 是安全档。组员各自在**不同的 IP** 上跑，互不影响。
+#:   → 嫌快就改成 1（退回串行）。
+AGENT_WORKERS = 3
+
+
 def build_bundle(server: str, ticket: str, msyt_dir: str,
                  helper_src: str = "",
                  cf_id: str = "", cf_secret: str = "",
@@ -201,7 +213,8 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
               "echo     (the agent probes both and picks whichever answers)"]
              if server_alt else []) + [
             "python -m msyt agent --server " + server
-            + ((" --server-alt " + server_alt) if server_alt else ""),
+            + ((" --server-alt " + server_alt) if server_alt else "")
+            + " --workers " + str(AGENT_WORKERS),
             "echo.",
             "echo agent stopped.",
             "pause",

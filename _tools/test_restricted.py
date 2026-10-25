@@ -154,6 +154,70 @@ def main():
               st["posts"] == 0 and st["posts_note"] == 1,
               f"posts={st['posts']} note={st['posts_note']}")
 
+        print("\n=== ②′ 受限判定必须**复验**（2026-10-25 加）===")
+        # ★ 为什么要有复验
+        #   站方会**间歇性**返回「提示信息」页（密集访问时出现），
+        #   而「站方限制」是**终态**（队列摘出去 + 正文写标记）——
+        #   一次瞬时异常 = 永久误标 = 数据污染。
+        #   → 判受限时必须**再请求一次**：复验正常 → 那是临时故障，不算受限。
+        from msyt.config import Config as _Cfg          # noqa: E402
+        from msyt.detail import DetailCollector          # noqa: E402
+
+        class _Resp:
+            def __init__(self, text):
+                self.text = text
+                self.status_code = 200
+
+        class _FlakyClient:
+            """第一次返回**提示页**，第二次返回正常页（模拟站方间歇性行为）。"""
+
+            def __init__(self):
+                self.n = 0
+
+            def get(self, url, **kw):
+                self.n += 1
+                return _Resp(NOTICE_HTML if self.n == 1 else NORMAL_HTML)
+
+            def get_nowait(self, url, **kw):
+                return _Resp(NORMAL_HTML)
+
+            def log(self, m):
+                pass
+
+        with db.lock:
+            db.conn.execute(
+                "INSERT INTO threads(tid,title,detail_state,posts_n,chars) "
+                "VALUES(?,?,?,?,?)", (90000005, "测试闪断帖", "pending", 0, 0))
+            db.conn.commit()
+        dc = DetailCollector(db, _FlakyClient(), _Cfg())
+        res = dc.collect_one(90000005)
+        check("★ 首次提示页、复验正常 → **不算**站方限制",
+              not res.get("restricted"), str(res)[:110])
+        row5 = db.conn.execute(
+            "SELECT detail_state FROM threads WHERE tid=?", (90000005,)).fetchone()
+        check("★ 且不会被误标成 restricted",
+              row5["detail_state"] != "restricted", row5["detail_state"])
+
+        # 反向：两次都是提示页 → 才算真的受限
+        class _AlwaysNotice(_FlakyClient):
+            def get(self, url, **kw):
+                self.n += 1
+                return _Resp(NOTICE_HTML)
+
+        with db.lock:
+            db.conn.execute(
+                "INSERT INTO threads(tid,title,detail_state,posts_n,chars) "
+                "VALUES(?,?,?,?,?)", (90000006, "测试真受限帖", "pending", 0, 0))
+            db.conn.commit()
+        dc2 = DetailCollector(db, _AlwaysNotice(), _Cfg())
+        res2 = dc2.collect_one(90000006)
+        check("★ 复验仍是提示页 → 判为站方限制",
+              bool(res2.get("restricted")), str(res2)[:110])
+        row6 = db.conn.execute(
+            "SELECT detail_state FROM threads WHERE tid=?", (90000006,)).fetchone()
+        check("★ 且真的被标成 restricted", row6["detail_state"] == "restricted",
+              row6["detail_state"])
+
         print("\n=== ④⑥ 协作侧：回传受限于「restricted」而非 failed ===")
         hub = Hub()
         svc = AssistService(db, hub)

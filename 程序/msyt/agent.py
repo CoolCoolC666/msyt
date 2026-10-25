@@ -154,7 +154,7 @@ class Agent:
                  heartbeat: float = 12.0, fail_limit: int = 0,
                  token: str = "", ticket: str = "",
                  server_alt: str = "", proxy: str = "",
-                 net_wait_minutes: int = 20):
+                 net_wait_minutes: int = 20, workers: int = 1):
         self.server = server.rstrip("/")
         #: ★ 备用控制面地址（2026-10-23 加）：
         #:   启动包由「**本地浏览器 + 服务器**」协同生成（见 bundle.py），
@@ -208,6 +208,24 @@ class Agent:
         self.state = "starting"
         #: 最近一次「领不到活」的说明（给界面看）
         self.state_note = ""
+
+        # ---- 并发采集（2026-10-25 加）----
+        #: ★ 并发单位是「一帖」不是「一个请求」：站方 token 有效期 < 30 秒，
+        #:   同帖的「详情页 → ajax」必须贴在一起，不能拆到不同线程。
+        #: ★ 默认 1（串行）—— 与改造前行为完全一致；要提速显式设 3。
+        #:   实测（2026-10-25 真实请求对）：1 路 0 异常 61,700 帖/天；
+        #:   3 路 0 异常 123,000 帖/天（最优点）；5 路出现连接错误、吞吐反降。
+        self.workers = max(1, int(workers or 1))
+        #: 连续回传失败的帖数（并发时是**共享**的 → 必须加锁）
+        self._submit_fail_streak = 0
+        #: ★ 收到停止指令后置位（并发时用来叫停各路）
+        self._stop_now = False
+        #: 每个线程一份 HTTP 会话（requests.Session 不适合多线程共用）
+        self._tls = threading.local()
+        #: 本机采集（指定帖）路径的计数（并发时共享 → 加锁）
+        self._c_local_ok = 0
+        self._c_local_failed = 0
+        self._c_local_restricted = 0
 
     # ---------------------------------------------------------------- 日志
     def log(self, msg: str) -> None:
@@ -272,6 +290,25 @@ class Agent:
         sess.headers.update({"User-Agent": "msyt-agent/1.1"})
         if proxy:
             sess.proxies.update({"http": proxy, "https": proxy})
+        return sess
+
+    def _session_for_thread(self):
+        """**当前线程**自己的 HTTP 会话（2026-10-25 并发采集加）。
+
+        ★ 为什么不用共享的那一个
+          requests.Session 带着 cookie jar / hooks / 适配器状态，
+          多线程共用会出现难复现的怪问题。
+          （urllib3 的连接池本身是线程安全的，但 Session 那层状态不是。）
+          → 每线程一份；串行时就是主线程那一份（**行为不变**）。
+        """
+        if self.workers <= 1:
+            if self._session is None:
+                self._session = self._mk_session(self.proxy)
+            return self._session
+        sess = getattr(self._tls, "sess", None)
+        if sess is None:
+            sess = self._mk_session(self.proxy)
+            self._tls.sess = sess
         return sess
 
     def _probe(self, base: str, proxy: str = "") -> bool:
@@ -519,18 +556,16 @@ class Agent:
           辅助请求用 10 秒，不值得为它占住 40 秒。
         """
         import requests
-        if self._session is None:
-            self._session = requests.Session()
-            self._session.headers.update({"User-Agent": "msyt-agent/1.1"})
+        sess = self._session_for_thread()
         url = self.server + path
         headers = {"Content-Type": "application/json"}
         if auth and self.token:
             headers["Authorization"] = "Bearer " + self.token
         to = timeout if timeout is not None else HTTP_TIMEOUT
         try:
-            r = self._session.request(method, url, headers=headers,
-                                      data=json.dumps(body) if body is not None else None,
-                                      timeout=to)
+            r = sess.request(method, url, headers=headers,
+                             data=json.dumps(body) if body is not None else None,
+                             timeout=to)
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
                 requests.exceptions.ChunkedEncodingError) as e:
@@ -1032,35 +1067,66 @@ class Agent:
         tids = [int(t) for t in (tids or []) if str(t).strip()]
         if tids:
             code = f"LOCAL:{self.node or 'member'}"
-            for tid in tids:
-                if self.link_lost:
-                    self.log("与控制面失联 → 停止本机采集。")
-                    break
-                self._set_state("collecting", f"本机采正文 tid={tid}")
-                self.log(f"本机开始采正文 tid={tid}")
-                try:
-                    payload = self.collect_one(tid)
-                except Exception as e:                 # noqa: BLE001
-                    out["detail_failed"] += 1
-                    self.log(f"✗ tid={tid} 采失败：{e}")
-                    continue
-                ok = bool(payload["summary"].get("ok"))
-                restricted = bool(payload["summary"].get("restricted"))
-                reason = payload["summary"].get("reason") or ""
-                try:
-                    self.submit(code, tid, payload)
-                except Exception as e:                 # noqa: BLE001
-                    out["detail_failed"] += 1
-                    self.log(f"✗ tid={tid} 回传失败：{e}")
-                    continue
-                if ok:
-                    out["detail_ok"] += 1
-                elif restricted:
-                    out["detail_restricted"] += 1
-                    self.log(f"⊘ tid={tid} 站方限制：{reason}（已标记，不计入已采详情帖）")
-                else:
-                    out["detail_failed"] += 1
+            self._c_local_ok = self._c_local_failed = self._c_local_restricted = 0
+            if self.workers > 1:
+                # ★ 并发采这些帖（2026-10-25 加）
+                #   每线程：自己的 HTTP 会话、自己的内存库、自己的 Client
+                #   （Agent.collect_one 每次都新建 → 天然不共享）
+                from .parallel import run_parallel
+                results, errors = run_parallel(
+                    tids, lambda t: self._collect_local_tid(t, code),
+                    workers=self.workers,
+                    should_stop=lambda: self.link_lost)
+                for t, e in errors:
+                    self.log(f"✗ tid={t} 失败：{type(e).__name__}: {e}")
+                    with self._lock:
+                        self._c_local_failed += 1
+            else:
+                for tid in tids:
+                    if self.link_lost:
+                        self.log("与控制面失联 → 停止本机采集。")
+                        break
+                    self._collect_local_tid(tid, code)
+            out["detail_ok"] += self._c_local_ok
+            out["detail_restricted"] += self._c_local_restricted
+            out["detail_failed"] += self._c_local_failed
         return out
+
+    def _collect_local_tid(self, tid: int, code: str) -> str:
+        """本机采一帖并回传（**本机采集**路径，与协作池那条分开）。
+
+        返回 'ok' / 'restricted' / 'failed'。
+        ★ 串行与并发共用（2026-10-25）；并发时三个计数必须加锁。
+        """
+        self._set_state("collecting", f"本机采正文 tid={tid}")
+        self.log(f"本机开始采正文 tid={tid}")
+        try:
+            payload = self.collect_one(tid)
+        except Exception as e:                 # noqa: BLE001
+            with self._lock:
+                self._c_local_failed += 1
+            self.log(f"✗ tid={tid} 采失败：{e}")
+            return "failed"
+        ok = bool(payload["summary"].get("ok"))
+        restricted = bool(payload["summary"].get("restricted"))
+        reason = payload["summary"].get("reason") or ""
+        try:
+            self.submit(code, tid, payload)
+        except Exception as e:                 # noqa: BLE001
+            with self._lock:
+                self._c_local_failed += 1
+            self.log(f"✗ tid={tid} 回传失败：{e}")
+            return "failed"
+        with self._lock:
+            if ok:
+                self._c_local_ok += 1
+            elif restricted:
+                self._c_local_restricted += 1
+            else:
+                self._c_local_failed += 1
+        if restricted:
+            self.log(f"⊘ tid={tid} 站方限制：{reason}（已标记，不计入已采详情帖）")
+        return "ok" if ok else ("restricted" if restricted else "failed")
 
     # ---------------------------------------------------------------- 领活
     def pick(self) -> List[Dict[str, Any]]:
@@ -1193,6 +1259,110 @@ class Agent:
         self.log(f"✗ tid={tid} 回传重试用尽，放弃这一帖（{last[:120]}）")
         return {"ok": False, "result": {}, **snap}
 
+    # ---------------------------------------------------------------- 采一帖
+    def _bump(self, key: str) -> None:
+        """计数 +1（**加锁** —— 并发时多个线程会同时调用）。"""
+        with self._lock:
+            attr = "_c_" + key
+            setattr(self, attr, getattr(self, attr) + 1)
+
+    def _process_pick(self, p: Dict[str, Any]) -> str:
+        """采一条领到的活并回传。
+
+        返回：'ok' / 'restricted' / 'failed' / 'skip' / 'stop'
+          · 'stop' = 连续回传失败达上限或失联 → **整轮停下**
+
+        ★ 串行与并发**共用**这一个方法（2026-10-25 加并发）：
+          并发时多个线程会同时调用它，所以
+          · 三个计数（done/failed/restricted）必须加锁
+          · 「连续回传失败」计数也是共享的 → 同样加锁
+        """
+        code, tid = p.get("task_code"), int(p.get("tid") or 0)
+        if not tid:
+            return "skip"
+        if self.link_lost or self._stop_now:
+            return "stop"
+        self.log(f"开始采 {code} tid={tid}")
+        try:
+            payload = self.collect_one(tid)
+            # ★ 必须在 submit 之前取 ok ——
+            #   submit() 会把 payload 整个清空（"传完即删"），
+            #   清空后再读 summary.ok 就永远是 False，计数会全错。
+            was_ok = bool(payload["summary"].get("ok"))
+            was_restricted = bool(payload["summary"].get("restricted"))
+            # ★ reason 要在 submit 之前取 —— submit 会清空整个 payload
+            reason = payload["summary"].get("reason") or ""
+            # ★ 这几个数也要在 submit 之前取（submit 清空 payload）
+            n_pages = payload["summary"].get("pages") or 0
+            n_posts = payload["summary"].get("posts") or 0
+            n_chars = payload["summary"].get("chars") or 0
+            if payload.get("stopped"):
+                self.log(f"⚠ tid={tid} 采到一半被中止（失联），不回传半截数据")
+                self._bump("failed")
+                return "failed"
+            r = self._submit_with_retry(code, tid, payload)
+            if not r["ok"]:
+                # ★ 重试用尽仍失败：只放弃**这一帖**，继续采下一帖
+                #   （用户 2026-10-23：「回传后失联就断开，不重试不大合理」）
+                self._bump("failed")
+                with self._lock:
+                    self._submit_fail_streak += 1
+                    streak = self._submit_fail_streak
+                if streak >= SUBMIT_FAIL_LIMIT:
+                    self._stop_now = True
+                    self.log(f"✗ 连续 {streak} 帖回传都失败 —— "
+                             f"判定控制面不可用，停止采集。")
+                    return "stop"
+                self.log(f"  → 这一帖放弃（数据只在内存里，不会残留），"
+                         f"**继续采下一帖**"
+                         f"（连续失败 {streak}/{SUBMIT_FAIL_LIMIT}）")
+                return "failed"
+            was_ok = r["was_ok"]
+            was_restricted = r["was_restricted"]
+            reason = r["reason"]
+            n_pages = r["n_pages"]
+            n_posts = r["n_posts"]
+            n_chars = r["n_chars"]
+            if was_ok:
+                self._bump("done")
+                # ★ 这行**必须打**：本机助手面板靠它数「已完成 N 帖」
+                #   （正则 /tid=\d+ ✓/）。不打的话面板永远显示 0，
+                #   用户看着就像"什么都没采"（实测踩过）。
+                self.log(f"tid={tid} ✓ {n_pages} 页 / {n_posts} 楼 / {n_chars} 字")
+            elif was_restricted:
+                # ★ 站方限制：正文不公开 —— 不是成员的失败，
+                #   服务端会把它记成「站方限制」并写入正文标记。
+                self._bump("restricted")
+                self.log(f"⊘ tid={tid} 站方限制：{reason or '正文不公开'}"
+                         f"（已标记，不计入已采详情帖）")
+            else:
+                self._bump("failed")
+            if isinstance(r.get("result"), dict) and r["result"].get("skipped"):
+                self.log(f"· tid={tid} 服务端保留本地已有数据"
+                         f"（{r['result'].get('reason')}），不覆盖")
+            with self._lock:
+                self._submit_fail_streak = 0
+            return "ok" if was_ok else ("restricted" if was_restricted else "failed")
+        except LinkLost:
+            # ★ 采正文阶段失联（不是回传阶段 —— 回传由
+            #   _submit_with_retry 内部重试，不会抛到这里）。
+            #   正文没采完，没有可回传的数据 → 放弃这一帖，
+            #   **继续采下一帖**（2026-10-23：一次抖动不该让整个 agent 停）。
+            #   真正的「失联」由 _fail_streak 累计判定
+            #   （连着 fail_limit 次才置 link_lost）。
+            self.log(f"✗ tid={tid} 采正文时联系不上控制面，本帖放弃"
+                     f"（继续采下一帖）")
+            self._bump("failed")
+            return "failed"
+        except Exception as e:                          # noqa: BLE001
+            self._bump("failed")
+            self.log(f"✗ {code} tid={tid} 失败：{e}")
+            # 出错就把栈打出来 —— 只打一行 message 会让人查半天
+            if self.verbose:
+                import traceback
+                self.log(traceback.format_exc()[-1200:])
+            return "failed"
+
     # ---------------------------------------------------------------- 主循环
     def run(self, once: bool = False, max_rounds: int = 0) -> Dict[str, Any]:
         self.login()
@@ -1207,12 +1377,11 @@ class Agent:
         #   但**自己的**遗留活要自己主动退。
         self.return_picks()
         rounds = 0
-        done = failed = restricted = 0
+        # ★ 计数放在实例上（并发时多个线程会同时 +1）—— 见 _bump()
+        self._c_done = self._c_failed = self._c_restricted = 0
+        self._submit_fail_streak = 0
+        self._stop_now = False
         stopped_by_link = False
-        #: 连续回传失败的帖数（2026-10-23 加）。
-        #:   单帖回传失败 → 只放弃那一帖，**继续采下一帖**；
-        #:   连续 SUBMIT_FAIL_LIMIT 帖都失败 → 才判定控制面真的不可用。
-        submit_fail_streak = 0
         try:
             while True:
                 if self.link_lost:
@@ -1261,91 +1430,27 @@ class Agent:
                 #   （正则 /领走 (\d+) 帖/）。不打的话面板永远显示 0，
                 #   用户看着就像"什么都没采"（实测踩过，正是用户反馈的那点）。
                 self.log(f"领走 {len(picks)} 帖")
-                for p in picks:
-                    if self.link_lost:
+                if self.workers > 1:
+                    # ★ 并发采这一批领到的活（2026-10-25 加）
+                    #   并发单位是**一帖**（同帖的详情页→ajax 必须贴在一起）。
+                    #   每线程：自己的 HTTP 会话、自己的内存库、自己的 Client
+                    #   （见 Agent.collect_one：它每次都新建，不共享）。
+                    from .parallel import run_parallel
+                    results, errors = run_parallel(
+                        picks, self._process_pick, workers=self.workers,
+                        should_stop=lambda: self.link_lost or self._stop_now)
+                    for p_, e in errors:
+                        self.log(f"✗ {p_.get('task_code')} tid={p_.get('tid')} "
+                                 f"失败：{type(e).__name__}: {e}")
+                        self._bump("failed")
+                    if self._stop_now or self.link_lost:
                         stopped_by_link = True
-                        break
-                    code, tid = p.get("task_code"), int(p.get("tid") or 0)
-                    if not tid:
-                        continue
-                    self.log(f"开始采 {code} tid={tid}")
-                    try:
-                        payload = self.collect_one(tid)
-                        # ★ 必须在 submit 之前取 ok ——
-                        #   submit() 会把 payload 整个清空（"传完即删"），
-                        #   清空后再读 summary.ok 就永远是 False，计数会全错。
-                        was_ok = bool(payload["summary"].get("ok"))
-                        was_restricted = bool(payload["summary"].get("restricted"))
-                        # ★ reason 要在 submit 之前取 —— submit 会清空整个 payload
-                        reason = payload["summary"].get("reason") or ""
-                        # ★ 这几个数也要在 submit 之前取（submit 清空 payload）
-                        n_pages = payload["summary"].get("pages") or 0
-                        n_posts = payload["summary"].get("posts") or 0
-                        n_chars = payload["summary"].get("chars") or 0
-                        if payload.get("stopped"):
-                            self.log(f"⚠ tid={tid} 采到一半被中止（失联），不回传半截数据")
-                            failed += 1
-                            continue
-                        r = self._submit_with_retry(code, tid, payload)
-                        if r["ok"]:
-                            was_ok = r["was_ok"]
-                            was_restricted = r["was_restricted"]
-                            reason = r["reason"]
-                            n_pages = r["n_pages"]
-                            n_posts = r["n_posts"]
-                            n_chars = r["n_chars"]
-                        else:
-                            # ★ 重试用尽仍失败：只放弃**这一帖**，继续采下一帖
-                            #   （用户 2026-10-23：「回传后失联就断开，不重试不大合理」）
-                            failed += 1
-                            submit_fail_streak += 1
-                            if submit_fail_streak >= SUBMIT_FAIL_LIMIT:
-                                stopped_by_link = True
-                                self.log(f"✗ 连续 {submit_fail_streak} 帖回传都失败 —— "
-                                         f"判定控制面不可用，停止采集。")
-                                break
-                            self.log(f"  → 这一帖放弃（数据只在内存里，不会残留），"
-                                     f"**继续采下一帖**"
-                                     f"（连续失败 {submit_fail_streak}/"
-                                     f"{SUBMIT_FAIL_LIMIT}）")
-                            continue
-                        if was_ok:
-                            done += 1
-                            # ★ 这行**必须打**：本机助手面板靠它数「已完成 N 帖」
-                            #   （正则 /tid=\d+ ✓/）。不打的话面板永远显示 0，
-                            #   用户看着就像"什么都没采"（实测踩过）。
-                            self.log(f"tid={tid} ✓ {n_pages} 页 / {n_posts} 楼 / "
-                                     f"{n_chars} 字")
-                        elif was_restricted:
-                            # ★ 站方限制：正文不公开 —— 不是成员的失败，
-                            #   服务端会把它记成「站方限制」并写入正文标记。
-                            restricted += 1
-                            self.log(f"⊘ tid={tid} 站方限制：{reason or '正文不公开'}"
-                                     f"（已标记，不计入已采详情帖）")
-                        else:
-                            failed += 1
-                        if isinstance(r.get("result"), dict) and r["result"].get("skipped"):
-                            self.log(f"· tid={tid} 服务端保留本地已有数据"
-                                     f"（{r['result'].get('reason')}），不覆盖")
-                        submit_fail_streak = 0
-                    except LinkLost:
-                        # ★ 采正文阶段失联（不是回传阶段 —— 回传由
-                        #   _submit_with_retry 内部重试，不会抛到这里）。
-                        #   正文没采完，没有可回传的数据 → 放弃这一帖，
-                        #   **继续采下一帖**（2026-10-23：一次抖动不该让整个 agent 停）。
-                        #   真正的「失联」由 _fail_streak 累计判定
-                        #   （连着 fail_limit 次才置 link_lost）。
-                        self.log(f"✗ tid={tid} 采正文时联系不上控制面，本帖放弃"
-                                 f"（继续采下一帖）")
-                        failed += 1
-                        continue
-                    except Exception as e:              # noqa: BLE001
-                        failed += 1
-                        self.log(f"✗ {code} tid={tid} 失败：{e}")
-                        # 出错就把栈打出来 —— 只打一行 message 会让人查半天
-                        if self.verbose:
-                            import traceback
-                            self.log(traceback.format_exc()[-1200:])
+                else:
+                    for p in picks:
+                        r = self._process_pick(p)
+                        if r == "stop":
+                            stopped_by_link = True
+                            break
                 if stopped_by_link or once:
                     break
                 time.sleep(self.interval)
@@ -1356,8 +1461,10 @@ class Agent:
             #   不退回去它们会卡在 taken 直到 30 分钟超时回收 ——
             #   期间整个池子对别的成员是空的（实测踩过）。
             self.return_picks()
-        return {"done": done, "failed": failed, "restricted": restricted,
-                "rounds": rounds, "stopped_by_link": stopped_by_link}
+        return {"done": self._c_done, "failed": self._c_failed,
+                "restricted": self._c_restricted,
+                "rounds": rounds, "stopped_by_link": stopped_by_link,
+                "workers": self.workers}
 
     def return_picks(self) -> int:
         """把本节点领走但还没回传的活退回池子（退出/启动时调用）。"""

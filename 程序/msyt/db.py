@@ -1320,21 +1320,35 @@ class DB:
     def claim_next_detail(self) -> Optional[Dict]:
         """取下一个待采详情。**先旧后新**：按发帖时间升序。
 
-        state='running' 的残留（进程被杀）也在这里回收 —— 它不是失败，
-        只是「上次没做完」，应当从断点续上。
+        ★★ 2026-10-25 修一个**并发下的致命 bug**
+          原来 WHERE 是 `q.state IN ('pending','running')` ——
+          把**正在采**（running）的帖也当成可领的活！
+          串行时看不出问题（采完就变 done），但**并发时三个 worker
+          会领到同一个 tid**（实测：detail-1/2/3 全领到 tid=8324409，
+          同一帖被采 3 遍，另外 4 个帖根本没被领到）。
+          → 现在**只领 `state='pending'`**。
+          → `running` 的残留（进程被杀留下的）由 `reset_stale_running()`
+            在每次采集任务开始时统一归位（断点续传靠它，不靠这里）。
+
+        ★ 双保险：即使锁失效，也不会重复领
+          UPDATE 带 `AND state='pending'` 条件，并检查 rowcount ——
+          抢不到就换下一条。
         """
         with self.lock:
             r = self.conn.execute(
                 """SELECT q.tid, q.pages_done, q.pages_total, q.attempts, t.pub_ts
                    FROM detail_queue q JOIN threads t ON t.tid = q.tid
-                   WHERE q.state IN ('pending','running')
+                   WHERE q.state = 'pending'
                    ORDER BY COALESCE(t.pub_ts, 0) ASC, q.tid ASC LIMIT 1""").fetchone()
             if not r:
                 return None
-            self.conn.execute(
+            cur = self.conn.execute(
                 "UPDATE detail_queue SET state='running', attempts=attempts+1, updated_at=? "
-                "WHERE tid=?",
+                "WHERE tid=? AND state='pending'",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), r["tid"]))
+            if not cur.rowcount:
+                # 被人抢走了（说明锁没起到互斥作用）→ 换下一条
+                return self.claim_next_detail()
             self.conn.commit()
             return dict(r)
 

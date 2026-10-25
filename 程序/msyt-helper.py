@@ -65,6 +65,15 @@ SERVER = "__MSYT_SERVER__"
 TICKET = "__MSYT_TICKET__"
 
 PORT = 8766
+
+#: agent 的**并发采集**线程数（2026-10-25 加）
+#: ★ 为什么是 3：实测（真实请求对，逐级加压）
+#:     1 路 0 异常 ≈ 61,700 帖/天 · 2 路 0 异常 ≈ 96,000
+#:     3 路 0 异常 ≈ 123,000（最优点）· 5 路出现连接错误、吞吐反降
+#:   每台成员机器在**不同的 IP** 上跑 → 互不影响。
+#:   嫌快就改成 1（退回串行）。
+HELPER_WORKERS = 3
+
 STATE = {
     "proc": None,
     "log": deque(maxlen=2000),
@@ -404,6 +413,10 @@ class Handler(BaseHTTPRequestHandler):
                 _auto_update(tok)
         if tok:
             cmd += ["--token", tok]
+            # ★ 并发采集（2026-10-25）：3 路是实测安全档
+            #   （1 路 ≈6.2 万帖/天，3 路 ≈12.3 万，5 路会出连接错误）。
+            #   每台成员机器在**不同的 IP** 上跑，互不影响。
+            cmd += ["--workers", str(HELPER_WORKERS)]
             with LOCK:
                 STATE["cred_src"] = src
             # （自动更新已在方法开头做过 —— 那里才能覆盖到「agent 还在跑」的情况）

@@ -367,21 +367,31 @@ def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
         tids.extend(t for t in picked if t not in known)
 
     if tids:
-        out = []
-        for tid in tids:
-            if job.should_stop():
-                job.log("收到停止指令")
-                break
-            res = dc.collect_one(tid)
-            out.append(res)
-            job.log(f"tid={tid} {'✓' if res['ok'] else '✗'} "
-                    f"{res.get('pages')} 页 / {res.get('posts')} 楼")
+        # ★ 并发采集（2026-10-25）：并发单位是**一帖**，
+        #   每 worker 用自己的 client 与 DB 连接（见 DetailCollector.for_thread）。
+        #   workers=1 时 run_parallel 走串行分支，行为与改造前一致。
+        from .parallel import run_parallel
+
+        def _one(tid: int) -> Dict[str, Any]:
+            c = dc.for_thread()
+            return c.collect_one(tid, should_stop=job.should_stop)
+
+        results, errors = run_parallel(tids, _one,
+                                       workers=cfg.detail_workers,
+                                       should_stop=job.should_stop)
+        out = [r for r in results if isinstance(r, dict)]
+        for tid, e in errors:
+            job.log(f"tid={tid} ✗ {type(e).__name__}: {e}")
+        for r in out:
+            job.log(f"tid={r.get('tid')} {'✓' if r.get('ok') else '✗'} "
+                    f"{r.get('pages')} 页 / {r.get('posts')} 楼")
         ok = sum(1 for r in out if r.get("ok"))
         return {"targets": out, "done": ok, "failed": len(out) - ok}
 
     res = dc.run(limit=p.get("limit") or 0,
                  max_attempts=p.get("max_attempts") or 3,
-                 should_stop=job.should_stop)
+                 should_stop=job.should_stop,
+                 workers=cfg.detail_workers)
     return res
 
 
