@@ -1177,6 +1177,27 @@ class DB:
                  for p in posts])
             self.conn.commit()
 
+    @staticmethod
+    def _clean_notice(notice: str) -> str:
+        """把站方的提示原文**洗成一句人话**。
+
+        ★ 为什么要洗（2026-10-25 实测踩过）
+          站方提示页的正文里，那句提示后面还跟着一整段它的 JS：
+              历史帖子仅限作者本人查看 if(history.length > (BROWSER.ie ? 0 : 1))
+              { document.write(' [ 点击这里返回上一页 ] '); } else { ... }
+          整段有几百个字符。直接拿它当日志行 → **日志框被两行就占满**，
+          用户看着像「并行之后看不到日志」（其实是行太长）；
+          写进 detail_warn / 正文标记行也一样，会把检索结果污染成一堆 JS。
+          → 只留「历史帖子仅限作者本人查看」这一句。
+        """
+        s = (notice or "").strip()
+        if "历史帖子仅限作者本人查看" in s:
+            return "历史帖子仅限作者本人查看"
+        s = re.sub(r"if\s*\(.*?\)\s*\{.*?\}", " ", s, flags=re.S)
+        s = re.sub(r"[{};]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s[:80] if s else "站方限制：历史帖子仅限作者本人查看"
+
     def mark_restricted(self, tid: int, notice: str) -> None:
         """标记一帖为「**站方限制，正文不公开**」。
 
@@ -1201,7 +1222,7 @@ class DB:
           按单线程 1.5 秒/帖算，**约 41% 的产能被这些永远采不到的帖白占**。
           → 站方限制是**终态**：标了就不该再进队列。
         """
-        notice = (notice or "").strip() or "站方限制：历史帖子仅限作者本人查看"
+        notice = self._clean_notice(notice)
         content = ("【站方限制】" + notice +
                    " —— 该帖详情正文不公开（仅作者本人可查看），"
                    "非漏采、非失败。")
@@ -1241,7 +1262,7 @@ class DB:
           · `detail_queue` 行置为终态 → **不再被捡起来重采**
             （这是提速的关键：受限帖是「采不到」，不是「还没采」）
         """
-        notice = (notice or "").strip() or "站方限制：历史帖子仅限作者本人查看"
+        notice = self._clean_notice(notice)
         content = ("【站方限制】" + notice +
                    " —— 该帖详情正文不公开（仅作者本人可查看），"
                    "非漏采、非失败。")
@@ -1829,3 +1850,4 @@ class DB:
         out["warned"] = c.execute(
             "SELECT COUNT(*) FROM threads WHERE COALESCE(detail_warn,'')<>''").fetchone()[0]
         return out
+

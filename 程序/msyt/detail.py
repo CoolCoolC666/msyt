@@ -44,13 +44,27 @@ from .parsers import (ThreadPage, parse_ajax_posts, parse_site_notice,
 from .textutil import extract_images, html_to_text
 
 
-#: 少贴补采的**次数上限**（2026-10-23 加）
+#: 站方限制的补采次数上限（2026-10-23 加）
 #:   有些帖是站方计数口径本来就有偏差（replies 含楼主之类），
 #:   补采多少次都补不齐 → 会 stale→重采→stale 死循环。
 #:   超过这个次数就只保留告警，不再自动入队。
 GAP_RETRY_MAX = 2
 #: 补采次数在 detail_warn 里的记号
 GAP_RETRY_MARK = "已补采"
+
+
+def _short(text: str, n: int = 60) -> str:
+    """把提示文字**截短**（2026-10-25 加）。
+
+    ★ 为什么
+      站方提示原文后面跟着一整段它的 JS（`if(history.length > ...){...}`），
+      几百个字符。直接当日志行 → **日志框被两行就占满**，
+      用户看着像「并行之后看不到日志」（其实是行太长）。
+    """
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if len(s) > n:
+        s = s[:n] + "…"
+    return s
 
 #: 单帖页数的**硬天花板**（2026-10-24 加）
 #:   防的是「站方给出一个离谱的总页数」这种异常，不是限制正常长帖。
@@ -163,13 +177,13 @@ class DetailCollector:
                         self.db.log("detail", str(tid), "notice_flaky", True,
                                     last_error)
                     else:
-                        restricted = notice
-                        last_error = notice
+                        restricted = self.db._clean_notice(notice)
+                        last_error = restricted
                         self._note_restricted_evidence(tid, html, page_no, "复验也不正常")
                         break
                 else:
-                    restricted = notice
-                    last_error = notice
+                    restricted = self.db._clean_notice(notice)
+                    last_error = restricted
                     self._note_restricted_evidence(tid, html, page_no, "复验仍是提示页")
                     break
 
@@ -440,7 +454,7 @@ class DetailCollector:
                 # ★ 站方限制：正文不公开 —— 已标记 + 写入正文，但**不算失败**
                 restricted += 1
                 self.db.set_detail_state(tid, "restricted", res.get("reason", ""))
-                self.client.log(f"[detail] tid={tid} ⊘ 站方限制：{res.get('reason')}"
+                self.client.log(f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
                                 f"（已标记，不计入已采详情帖）")
             else:
                 failed += 1
@@ -528,7 +542,7 @@ class DetailCollector:
                 # ② 状态落库（db 自己的共享写锁 → 串行、线程安全）
                 if kind == "restricted":
                     db.set_detail_state(tid, "restricted", res.get("reason", ""))
-                    msg = (f"[detail] tid={tid} ⊘ 站方限制：{res.get('reason')}"
+                    msg = (f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
                            f"（已标记，不计入已采详情帖）")
                 elif kind == "failed":
                     db.set_detail_state(tid, "failed", res.get("error", ""))
@@ -814,3 +828,5 @@ class DetailCollector:
                     out["warnings"].append({
                         "tid": r["tid"], "posts": uniq, "warnings": warns})
         return out
+
+
