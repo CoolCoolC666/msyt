@@ -69,21 +69,24 @@ def main() -> int:
     #   改前改后完全一样 → 不可能出现增量 → 必然假失败。
     #   （实测曾挑中 tid=8343588，replies=0，三个断言全挂 —— 是选样问题，不是代码问题。）
     #
-    # ★★ 还有一个**尚未解决**的选样盲区（2026-10-24 夜，留给下一轮）：
+    # ★★ 「在目标源里只作为公告出现」的帖要**排除**（2026-10-25 修）
     #   同一 tid 在站方不同板块里可能**既在置顶行、又在公告区**：
     #     · 主板块的置顶行 → 有回复数（真值）
     #     · 部门页的公告区 → **没有回复数**（公告区只有标题）
     #   本测试重采的是**部门源**。若挑中的帖在那个部门源里**只作为公告出现**，
     #   列表页根本不提供回复数 → 「重采后把 replies 刷新回站方真值」**不可能成立**
     #   （实测挑中 tid=6177045，replies 78 → 改小成 75 → 重采后仍是 75）。
-    #   ★ 正确的修法是**按源**记录「这个 tid 在这个源里是帖行还是公告行」，
-    #     即给 `thread_sources` 加一列 kind（'row' / 'announce'），
-    #     然后选样时排除「在目标源里是 announce」的帖。
-    #   ★ 临时绕法：选样时排除「author 为空且 replies 不为 0」的帖 —— 不精确但能过。
+    #   ★ 排除依据：`thread_list_forms` 里记着「这个 tid 在这个源里以什么形态出现过」
+    #     （row 普通帖行 / stick 置顶帖行 / announce 站方公告区），
+    #     来源是列表采集时顺带记下的。
+    #   ★ 局限：该表只覆盖**采过第一页**的源；没采过的源不会排除（保守 → 可能仍选中）。
     cand = conn.execute(
         "SELECT t.tid, t.replies, s.source FROM threads t "
         "JOIN thread_sources s ON s.tid=t.tid "
         "WHERE COALESCE(t.detail_state,'pending')='done' AND t.replies >= 3 "
+        "AND NOT EXISTS (SELECT 1 FROM thread_list_forms f "
+        "                WHERE f.tid=t.tid AND f.source=s.source "
+        "                  AND f.kind='announce') "
         "GROUP BY t.tid ORDER BY t.tid DESC").fetchall()
     if not cand:
         print("  （库里还没有采完详情的帖，跳过）")

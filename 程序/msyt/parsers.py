@@ -105,6 +105,16 @@ class ListRow:
     #:   → 公告行**只允许「填空」，不允许「覆盖」**（见 db.upsert_threads）。
     is_announcement: int = 0
 
+    #: ★ 这一行是不是**置顶帖**（`stickthread_`）？
+    #:
+    #: 为什么单独记（2026-10-25 加）：
+    #:   站方对**历史帖**只给作者本人看，但**置顶的老帖能看**
+    #:   （实测 tid=6177045，2013-08-30 的置顶帖 → 77 楼全采到；
+    #:     而同一天发的另外 13 个帖全部受限）。
+    #:   → 批量标注「受限帖」时，置顶帖必须**豁免**，否则会把重要的老帖误标。
+    #:   → 所以要把「这个 tid 在列表页里以置顶形态出现过」记进库，供判据查询。
+    is_stick: int = 0
+
     def as_tuple(self) -> tuple:
         return (self.tid, self.title, self.url, self.category, self.state,
                 self.dept_id, self.dept_name, ",".join(self.extra_dept_ids),
@@ -225,10 +235,11 @@ def parse_list_page(html: str, list_url: str = "") -> List[ListRow]:
     #      帖行的元数据更全（作者/发帖时间/回复数/浏览数），
     #      公告行只有标题和链接 → 先到先得，**让帖行赢**。
     for tb in soup.select("tbody[id^=normalthread_], tbody[id^=stickthread_]"):
-        m = re.search(r"(?:normalthread|stickthread)_(\d+)", tb.get("id") or "")
+        m = re.match(r"(normalthread|stickthread)_(\d+)", tb.get("id") or "")
         if not m:
             continue
-        tid = int(m.group(1))
+        row_kind = m.group(1)          # normalthread / stickthread
+        tid = int(m.group(2))
         if tid in seen:
             continue
         seen.add(tid)
@@ -238,6 +249,9 @@ def parse_list_page(html: str, list_url: str = "") -> List[ListRow]:
             continue
 
         row = ListRow(tid=tid, title="", url="")
+        # ★ 置顶帖标记：批量标注「受限帖」时要**豁免**它们
+        #   （站方对历史帖只给作者本人看，但置顶的老帖能看）
+        row.is_stick = 1 if row_kind == "stickthread" else 0
 
         # ---- 方括号标签：按「是不是已知维度名」来分派，不靠位置 ----
         #     （站方改版会调顺序，靠位置必崩）

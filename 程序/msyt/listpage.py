@@ -171,6 +171,9 @@ class ListCollector:
             for row in rows:
                 self.db.add_source(row.tid, source.key)
                 self.db.set_tags(row.tid, self._tags_of(row, source))
+            # 记下「这个 tid 在本源以什么形态出现」（普通行/置顶行/公告区）
+            # → 置顶记录是**批量标注受限帖时的豁免名单**的依据
+            self.db.add_list_forms(rows, source.key)
             # 分组/区县市要靠部门字典才能定，字典可能这时才刚抓好
             self.db.backfill_dept_meta()
             tp = info.get("total_page") or 0
@@ -248,6 +251,7 @@ class ListCollector:
             for row in rows:
                 self.db.add_source(row.tid, source.key)
                 self.db.set_tags(row.tid, self._tags_of(row, source))
+            self.db.add_list_forms(rows, source.key)
         after = self.db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         new = max(0, after - before)
         if new:

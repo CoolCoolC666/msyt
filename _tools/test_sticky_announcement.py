@@ -233,6 +233,26 @@ finally:
     shutil.rmtree(_tmp, ignore_errors=True)
 
 print()
+print("### ⑥ 置顶标记（批量标注受限帖的豁免名单依据，2026-10-25 加）")
+check("置顶帖行带 is_stick=1", by[8333204].is_stick == 1)
+check("另一个置顶帖也带标记", by[6177045].is_stick == 1)
+check("普通帖行 is_stick=0", by[8344484].is_stick == 0 and by[8344485].is_stick == 0)
+check("公告行 is_stick=0（公告不是置顶）", all(a.is_stick == 0 for a in ann))
+
+db_src = open(os.path.join(PKG, "msyt", "db.py"), encoding="utf-8").read()
+listpage_src2 = open(os.path.join(PKG, "msyt", "listpage.py"), encoding="utf-8").read()
+check("db.py 有 thread_list_forms 表",
+      "CREATE TABLE IF NOT EXISTS thread_list_forms" in db_src)
+check("db.py 有豁免名单查询（置顶+公告）",
+      "def exempt_tids" in db_src and "'stick','announce'" in db_src)
+check("列表采集会记形态",
+      "add_list_forms" in listpage_src2)
+check("mark_restricted 会把队列行置为终态",
+      "UPDATE detail_queue SET state='restricted'" in db_src)
+check("有批量标记接口（一次事务，39.9 万帖用）",
+      "def mark_restricted_bulk" in db_src)
+
+print()
 print("=" * 70)
 print(f"结果：{OK} 通过 / {FAIL} 失败")
 sys.exit(1 if FAIL else 0)

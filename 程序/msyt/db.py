@@ -133,6 +133,26 @@ CREATE TABLE IF NOT EXISTS thread_sources (
     PRIMARY KEY (tid, source)
 );
 
+-- ---------------------------------------------------------------- 列表形态
+-- ★ 这个 tid 在列表页里**以什么形态出现过**（2026-10-25 加）
+--   kind: row      普通帖行（tbody[id^=normalthread_]）
+--         stick    置顶帖行（tbody[id^=stickthread_]）
+--         announce 站方公告区（#msbgt 里的裸链接）
+-- ★ 为什么单独记：
+--   站方对**历史帖**只给作者本人查看，但**置顶的老帖能看**
+--   （实测 tid=6177045，2013-08-30 的置顶帖 → 77 楼全采到；
+--     同一天发的另外 13 个帖全部受限）。
+--   → 批量标注「受限帖」时，置顶帖必须**豁免**，否则会误标重要的老帖。
+--   → 单独建表而不是给 thread_sources 加列：不动已有表结构，零迁移风险。
+CREATE TABLE IF NOT EXISTS thread_list_forms (
+    tid        INTEGER NOT NULL,
+    source     TEXT NOT NULL,
+    kind       TEXT NOT NULL,   -- row / stick / announce
+    first_seen TEXT,
+    PRIMARY KEY (tid, source, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_tlf_kind ON thread_list_forms(kind, tid);
+
 -- ---------------------------------------------------------------- 列表变更留痕
 -- ★ 列表页那一趟**看到了什么、和上次比变了什么**（2026-10-23 加）
 --   为什么必须留：列表采集是「upsert 覆盖」——
@@ -1065,6 +1085,67 @@ class DB:
                 (tid, source, time.strftime("%Y-%m-%d %H:%M:%S")))
             self.conn.commit()
 
+    def add_list_form(self, tid: int, source: str, kind: str) -> None:
+        """记下「这个 tid 在这个源的列表页里以什么形态出现过」。
+
+        kind: row（普通帖行）/ stick（置顶帖行）/ announce（站方公告区）。
+        置顶记录是**批量标注受限帖时的豁免名单**的依据。
+        """
+        if kind not in ("row", "stick", "announce"):
+            return
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO thread_list_forms(tid,source,kind,first_seen) "
+                "VALUES(?,?,?,?)",
+                (tid, source, kind, time.strftime("%Y-%m-%d %H:%M:%S")))
+            self.conn.commit()
+
+    def add_list_forms(self, rows, source: str) -> int:
+        """批量记形态（**一次事务**）。
+
+        ★ 为什么要批量版：列表页一页 99 行，
+          逐行单独 commit 会把列表采集拖慢一个数量级。
+        """
+        items = []
+        for r in rows:
+            if getattr(r, "is_announcement", 0):
+                kind = "announce"
+            elif getattr(r, "is_stick", 0):
+                kind = "stick"
+            else:
+                kind = "row"
+            items.append((int(r.tid), source, kind,
+                          time.strftime("%Y-%m-%d %H:%M:%S")))
+        if not items:
+            return 0
+        with self.lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO thread_list_forms(tid,source,kind,first_seen) "
+                "VALUES(?,?,?,?)", items)
+            self.conn.commit()
+        return len(items)
+
+    def sticky_tids(self) -> set:
+        """曾经以**置顶**形态出现过的 tid 集合（豁免名单）。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT tid FROM thread_list_forms WHERE kind='stick'").fetchall()
+        return {int(r[0]) for r in rows}
+
+    def exempt_tids(self) -> set:
+        """批量标注受限帖时的**豁免名单**（置顶帖 + 公告帖）。
+
+        ★ 两类都要（2026-10-25 实测）：
+          · stick    置顶的老帖，站方主动保留 → 可见
+          · announce 站方公告区的链接，没有发帖时间（pub_ts=0）
+                     → 会被时间判据误当成"很老的帖"，但它**实际可见**
+        """
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT tid FROM thread_list_forms "
+                "WHERE kind IN ('stick','announce')").fetchall()
+        return {int(r[0]) for r in rows}
+
     # ---------------------------------------------------------------- 楼层
     def save_posts(self, tid: int, page_no: int, posts: List[Dict]) -> None:
         """落库一页楼层。
@@ -1111,6 +1192,14 @@ class DB:
         ⚠ 正文标记行的 pid 用**负数**（-tid）：真实 pid 都是正数，
           负数保证永远不会和站方真实楼层撞号。
         ⚠ `posts_n` 记 0：这不是一层楼，不能算进楼层数。
+
+        ★ 队列行**必须一并置为终态**（2026-10-25 修）
+          原来这里只写 `posts` 与 `threads`，**没碰 `detail_queue`** →
+          受限帖在队列里仍是 `pending` → `claim_next_detail` 会**反复把它捡起来重采**，
+          每次都白跑一次详情页请求 + 一轮限速等待。
+          实测：库里 14,910 个受限帖仍挂在队列 pending 上，
+          按单线程 1.5 秒/帖算，**约 41% 的产能被这些永远采不到的帖白占**。
+          → 站方限制是**终态**：标了就不该再进队列。
         """
         notice = (notice or "").strip() or "站方限制：历史帖子仅限作者本人查看"
         content = ("【站方限制】" + notice +
@@ -1132,7 +1221,56 @@ class DB:
                 "UPDATE threads SET detail_state='restricted', detail_warn=?, "
                 "posts_n=0, chars=?, updated_at=? WHERE tid=?",
                 (notice, len(content), now, int(tid)))
+            # ★ 队列行置终态：站方限制不是「还没采」，是「采不到」
+            self.conn.execute(
+                "UPDATE detail_queue SET state='restricted', last_error=?, "
+                "updated_at=? WHERE tid=? AND state IN ('pending','running')",
+                (notice, now, int(tid)))
             self.conn.commit()
+
+    def mark_restricted_bulk(self, tids: Iterable[int], notice: str = "") -> int:
+        """**批量**标记「站方限制，正文不公开」。
+
+        ★ 为什么要批量版（2026-10-25）
+          阈值之前的帖有 **38 万个**量级，逐条调用 `mark_restricted` 意味着
+          38 万次独立事务 —— 那要跑到天荒地老。这里**一次事务**搞定。
+
+        ★ 语义与 mark_restricted 完全一致
+          · `threads.detail_state='restricted'` → 不计入「已采详情帖」
+          · posts 里写一行**提示正文**（pid 用 -tid，负数不与真实楼层撞号）
+          · `detail_queue` 行置为终态 → **不再被捡起来重采**
+            （这是提速的关键：受限帖是「采不到」，不是「还没采」）
+        """
+        notice = (notice or "").strip() or "站方限制：历史帖子仅限作者本人查看"
+        content = ("【站方限制】" + notice +
+                   " —— 该帖详情正文不公开（仅作者本人可查看），"
+                   "非漏采、非失败。")
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        tids = [int(t) for t in tids]
+        if not tids:
+            return 0
+        post_rows = [(-t, t, 0, 0, "站方提示", "", now, 0,
+                      content, len(content), "[]", now) for t in tids]
+        with self.lock:
+            self.conn.executemany(
+                """INSERT INTO posts
+                   (pid,tid,page_no,floor,author,author_uid,post_time,post_ts,
+                    content,chars,images,fetched_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(pid) DO UPDATE SET
+                     content=excluded.content, chars=excluded.chars,
+                     fetched_at=excluded.fetched_at""",
+                post_rows)
+            self.conn.executemany(
+                "UPDATE threads SET detail_state='restricted', detail_warn=?, "
+                "posts_n=0, chars=?, updated_at=? WHERE tid=?",
+                [(notice, len(content), now, t) for t in tids])
+            self.conn.executemany(
+                "UPDATE detail_queue SET state='restricted', last_error=?, "
+                "updated_at=? WHERE tid=? AND state IN ('pending','running')",
+                [(notice, now, t) for t in tids])
+            self.conn.commit()
+        return len(tids)
 
     def save_flows(self, tid: int, flows: List[Dict]) -> None:
         with self.lock:
