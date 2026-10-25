@@ -431,6 +431,14 @@ class AssistService:
             pages_total=n_pages or (summary.get("pages") or len(pages)),
             posts_n=cnt["n"],
             chars=cnt["c"])
+        # ★★ 队列行也要收（2026-10-25 修）
+        #   threads.detail_state 与 detail_queue.state 是**两张表**，
+        #   改前者不会改后者 → 组员回传成功后，那行永远停在 'pending'，
+        #   既白占产能（会被详情采集重复领走再采一遍），
+        #   又让列表采集一直以为它「还没采详情」。
+        #   实测库里积了 231 条这样的孤儿活（全部来自组员回传）。
+        self.db.finish_queue(int(tid), "done" if ok else "failed",
+                             "" if ok else str(summary.get("error") or "回传失败"))
         if summary.get("warnings"):
             self.db.set_detail_warn(int(tid), "；".join(summary["warnings"]))
 

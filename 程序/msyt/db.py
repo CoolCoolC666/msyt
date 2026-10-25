@@ -1396,6 +1396,30 @@ class DB:
             self.conn.commit()
             return cur.rowcount or 0
 
+    def finish_queue(self, tid: int, state: str = "done", error: str = "") -> int:
+        """把 `detail_queue` 里这一行置终态（已采完 / 失败）。
+
+        ★★ 为什么需要这个方法（2026-10-25 修）
+          `threads.detail_state` 与 `detail_queue.state` 是**两张表**，
+          谁改了前者**不会**自动改后者。
+
+          组员回传（`assist.submit`）只写 `threads.detail_state='done'`，
+          队列里那行就永远停在 `'pending'` →
+            ① 白占产能（会被详情采集领走，发现已有正文，再采一遍）
+            ② 每次列表采集都以为它「还没采详情」
+          实测：库里积了 231 条这样的孤儿活（全部来自组员回传）。
+
+          → 凡是把帖子置成终态的路径，都必须把队列行一起收掉。
+          ★ 只收 `'pending'/'running'` 的行，不碰已终态的。
+        """
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE detail_queue SET state=?, last_error=?, updated_at=? "
+                "WHERE tid=? AND state IN ('pending','running')",
+                (state, error[:500], time.strftime("%Y-%m-%d %H:%M:%S"), int(tid)))
+            self.conn.commit()
+            return cur.rowcount or 0
+
     # ---------------------------------------------------------------- 水位
     def get_watermark(self, source: str) -> Optional[Dict]:
         with self.lock:
