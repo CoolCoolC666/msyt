@@ -470,6 +470,14 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
     ⚠ `extra_dept_ids` 是逗号串，直接 `LIKE '%512%'` 会误命中 1512 这种。
     所以两边都归一到「逗号包起来的串」再用 `instr` 精确找：
         instr(',' || extra_dept_ids || ',', ',512,') > 0
+
+    ★★ 2026-10-25 修：必须**同时排除 `restricted`**
+      原来只排除了 `done` → 41.8 万「站方限制（正文不公开）」的帖
+      被当成「还没采详情」全筛进来（实测筛出 584,587 帖）→
+      这些帖**永远采不到**（站方只给提示页），却排在队首 →
+      worker 一上来就撞上它们 → 白烧产能、界面看着像「如跑」。
+      → 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`。
+      （`stale` = 待重采，仍要入选 —— 它确实还要采。）
     """
     ids = [str(x) for x in (dept_ids or []) if str(x).strip()]
     if not ids:
@@ -482,7 +490,7 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
         params.append(f",{i},")
     rows = db.conn.execute(
         "SELECT tid FROM threads "
-        "WHERE COALESCE(detail_state,'pending') <> 'done' "
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted') "
         f"AND ({' OR '.join(parts)}) "
         "ORDER BY COALESCE(pub_ts,0) ASC, tid ASC", params).fetchall()
     return [r["tid"] for r in rows]
@@ -640,6 +648,47 @@ def api_pending(request: Request,
             "sample": tids[:20]}
 
 
+@app.get("/api/pending-by-dept")
+def api_pending_by_dept(request: Request) -> Dict[str, Any]:
+    """**每个部门**还欠多少详情（详情采集的部门选择器要用）。
+
+    ★ 为什么要单独一个接口（2026-10-25 用户反馈）
+      详情采集的选择器原来在部门名后面挂的是**部门编号**（typeid，如 533、728），
+      看着像「已采页数」，而选部门的意义其实是「这个部门还欠多少正文」。
+      → 改成显示**待采详情数**，一眼能看出哪些部门是大头。
+
+    ★ 为什么一次返回全部、而不是每个部门发一次请求
+      109 个部门发 109 次 → 接口刷屏、页面卡。
+      → 一次查询 + 内存归组。
+
+    ★ 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`
+      （restricted = 站方不公开正文，永远采不到，不该算进工作量）
+    """
+    _require_member(request)
+    cfg = _cfg()
+    db = get_db(cfg)
+    rows = db.conn.execute(
+        "SELECT dept_id, extra_dept_ids FROM threads "
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted')"
+    ).fetchall()
+    counts: Dict[int, int] = {}
+    for r in rows:
+        did = r["dept_id"]
+        if did:
+            try:
+                counts[int(did)] = counts.get(int(did), 0) + 1
+            except (TypeError, ValueError):
+                pass
+        # 多标签部门：一个帖可能同时属于多个部门
+        for extra in (r["extra_dept_ids"] or "").split(","):
+            extra = extra.strip()
+            if not extra.isdigit():
+                continue
+            e = int(extra)
+            counts[e] = counts.get(e, 0) + 1
+    return {"counts": counts, "total": len(rows)}
+
+
 @app.get("/api/list-changes")
 def api_list_changes(request: Request,
                      limit: int = Query(200, ge=1, le=1000),
@@ -662,7 +711,7 @@ def api_list_changes(request: Request,
 
 @app.get("/api/integrity")
 def api_integrity(request: Request) -> Dict[str, Any]:
-    """完整性体检 —— **管理员专属**。
+    """完整性体检 —— **管理员专属**（同步版，给脚本/测试用）。
 
     成员看不到这一页：它是「我们对全库数据是否完整」的自查，
     属于质量管控视角；成员只需要知道自己采的那部分有没有成。
@@ -672,12 +721,50 @@ def api_integrity(request: Request) -> Dict[str, Any]:
       warnings  软警告（站方计数不自洽等）
       growth    **疑似有增量**（站方又回复了，本地正文过时 → 可重跑）
       stale     已被标记为「待重采」的帖
+
+    ★ 网页界面**不用这个接口**（2026-10-25 用户反馈「容易卡」）：
+      它会同步扫全库（60 万帖量级），页面请求会一直挂着。
+      界面走 `POST /api/integrity/run`（后台任务）+ 轮询，页面不挂死。
     """
     require_admin(request)
     cfg = _cfg()
     db = get_db(cfg)
     dc = DetailCollector(db, Client(cfg, verbose=False), cfg)
     return dc.integrity()
+
+
+@app.post("/api/integrity/run")
+def api_integrity_run(request: Request) -> Dict[str, Any]:
+    """**后台**跑一次完整性体检（界面用这个）。
+
+    ★ 为什么要后台（2026-10-25 用户反馈「体检界面打开就卡」）
+      体检要扫全库（60 万帖量级），同步跑会让浏览器的请求一直挂着，
+      页面看着像死了。改成后台任务后：
+        · 页面立刻返回任务号，界面显示「体检中…」
+        · 前端轮询任务状态，跑完再渲染结果
+        · 期间页面其它功能照常用
+    """
+    require_admin(request)
+    # 同类任务互斥：体检很重，不许同时跑两个
+    for j in JOBS.list():
+        if j.get("kind") == "integrity" and j.get("state") == "running":
+            raise HTTPException(409, "已有一个体检任务在跑，请等它跑完")
+    cfg = _cfg()
+    job = JOBS.create("integrity", {}, node="admin")
+    job.log("开始体检：扫描全库详情帖…（全库量级，耗时较长）")
+
+    def _run(j: Job) -> Dict[str, Any]:
+        db = get_db(cfg)
+        dc = DetailCollector(db, Client(cfg, verbose=False), cfg)
+        j.log("扫描中…")
+        r = dc.integrity()
+        j.log(f"体检完成：检查 {r.get('checked')} 帖，"
+              f"问题 {len(r.get('problems') or [])} 条，"
+              f"增量 {len(r.get('growth') or [])} 条")
+        return r
+
+    JOBS.spawn(job, _run)
+    return {"job": job.to_dict(tail=0)}
 
 
 @app.post("/api/integrity/retry")

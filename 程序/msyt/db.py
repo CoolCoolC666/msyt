@@ -1313,11 +1313,35 @@ class DB:
 
     # ---------------------------------------------------------------- 队列
     def enqueue_details(self, tids: Iterable[int], cutoff_ts: Optional[int] = None) -> Tuple[int, int]:
-        """把待采详情入队。返回 (入队数, 因水位线跳过数)。"""
+        """把待采详情入队。返回 (入队数, 因水位线跳过数)。
+
+        ★ 2026-10-25 修：**已终态的帖不再入队**
+          「按部门全采」会把该部门下**所有**没采过详情的帖入队，
+          而其中 41.8 万帖早已标了 `restricted`（站方不公开正文，采不到）、
+          2.2 万帖早已 `done`（采完了）。
+          `INSERT OR IGNORE` 只在队列里**没有这一行**时才插入 →
+          队列行被清掉过的那些帖会被**重新插回 pending**
+          → worker 从队首开始，一路撞上这些「注定白跑」的帖。
+
+          实测（2026-10-25）：「按部门全采」筛出 584,587 帖，
+          其中绝大多数早就采不动了 → 白占产能、队首全是老帖。
+
+          → 入队前先看 `threads.detail_state`：
+            `restricted` / `done` 是终态，直接跳过；
+            `stale`（待重采）**照常入队**（它确实还要采）。
+        """
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         queued = skipped = 0
+        done_hits = 0
         with self.lock:
             for tid in tids:
+                # ★ 已终态的帖不入队（done / restricted）
+                _st = self.conn.execute(
+                    "SELECT detail_state FROM threads WHERE tid=?",
+                    (int(tid),)).fetchone()
+                if _st and (_st["detail_state"] or "") in ("done", "restricted"):
+                    done_hits += 1
+                    continue
                 if cutoff_ts is not None:
                     r = self.conn.execute(
                         "SELECT pub_ts FROM threads WHERE tid=?", (tid,)).fetchone()
@@ -1336,6 +1360,8 @@ class DB:
                     "VALUES(?, 'pending', ?, ?)", (tid, now, now))
                 queued += cur.rowcount or 0
             self.conn.commit()
+        # 第 3 个返回值：因**已终态**（done / restricted）而没入队的数量
+        self.last_enqueue_done_hits = done_hits
         return queued, skipped
 
     def claim_next_detail(self) -> Optional[Dict]:

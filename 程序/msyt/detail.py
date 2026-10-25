@@ -491,43 +491,65 @@ class DetailCollector:
         done = failed = restricted = 0
         stopped = False
         t_start = time.time()
-        state = {"done": 0, "failed": 0, "restricted": 0}
+        state = {"done": 0, "failed": 0, "restricted": 0, "_finished": False}
         lock = threading.Lock()
         progress = self._make_progress(state, lock, t_start, limit, 1)
-        while True:
-            if should_stop is not None and should_stop():
-                stopped = True
-                self.client.log("[detail] 收到停止指令，收尾中…")
-                break
-            if limit and done + failed + restricted >= limit:
-                break
-            item = self.db.claim_next_detail()
-            if item is None:
-                break
-            tid = item["tid"]
-            res = self.collect_one(tid, pages_done=item.get("pages_done") or 0,
-                                   pages_total=item.get("pages_total") or 0,
-                                   max_attempts=max_attempts)
-            if res["ok"]:
-                done += 1
-                state["done"] = done
-                self.client.log(
-                    f"[detail] tid={tid} ✓ {res['pages']} 页 / {res['posts']} 楼 / "
-                    f"{res['chars']} 字")
-            elif res.get("restricted"):
-                # ★ 站方限制：正文不公开 —— 已标记 + 写入正文，但**不算失败**
-                restricted += 1
-                state["restricted"] = restricted
-                self.db.set_detail_state(tid, "restricted", res.get("reason", ""))
-                self.client.log(f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
-                                f"（已标记，不计入已采详情帖）")
-            else:
-                failed += 1
-                state["failed"] = failed
-                self.db.set_detail_state(tid, "failed", res.get("error", ""))
-                self.db.set_thread_detail(tid, detail_state="failed")
-                self.client.log(f"[detail] tid={tid} ✗ {res.get('error')}")
-            progress()
+
+        # ★★ 独立心跳（2026-10-25 用户反馈「看着像如跑」）
+        #   进度行原来只在**采完一帖之后**才检查要不要打 →
+        #   一帖卡住（站方慢 / 复验重试）就长时间一行不出。
+        #   → 独立线程每秒醒一次，由 _progress 按 5 秒节流出队。
+        def _ticker() -> None:
+            while True:
+                with lock:
+                    if state.get("_finished"):
+                        return
+                time.sleep(1)
+                # ★ 不 force —— 由 _progress 自己按 PROGRESS_INTERVAL（5 秒）节流
+                #   （force=True 会变成每秒一行，刷屏）
+                progress()
+
+        tick = threading.Thread(target=_ticker, name="detail-ticker",
+                                daemon=True)
+        tick.start()
+        try:
+            while True:
+                if should_stop is not None and should_stop():
+                    stopped = True
+                    self.client.log("[detail] 收到停止指令，收尾中…")
+                    break
+                if limit and done + failed + restricted >= limit:
+                    break
+                item = self.db.claim_next_detail()
+                if item is None:
+                    break
+                tid = item["tid"]
+                res = self.collect_one(tid, pages_done=item.get("pages_done") or 0,
+                                       pages_total=item.get("pages_total") or 0,
+                                       max_attempts=max_attempts)
+                if res["ok"]:
+                    done += 1
+                    state["done"] = done
+                    self.client.log(
+                        f"[detail] tid={tid} ✓ {res['pages']} 页 / {res['posts']} 楼 / "
+                        f"{res['chars']} 字")
+                elif res.get("restricted"):
+                    # ★ 站方限制：正文不公开 —— 已标记 + 写入正文，但**不算失败**
+                    restricted += 1
+                    state["restricted"] = restricted
+                    self.db.set_detail_state(tid, "restricted", res.get("reason", ""))
+                    self.client.log(f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
+                                    f"（已标记，不计入已采详情帖）")
+                else:
+                    failed += 1
+                    state["failed"] = failed
+                    self.db.set_detail_state(tid, "failed", res.get("error", ""))
+                    self.db.set_thread_detail(tid, detail_state="failed")
+                    self.client.log(f"[detail] tid={tid} ✗ {res.get('error')}")
+                progress()
+        finally:
+            with lock:
+                state["_finished"] = True
         el = time.time() - t_start
         self.client.log(f"[detail] 完成 {done} 帖，站方限制 {restricted} 帖，"
                         f"失败 {failed} 帖，用时 {el:.0f}s")
@@ -623,7 +645,16 @@ class DetailCollector:
                     db.set_detail_state(tid, "failed", res.get("error", ""))
                     db.set_thread_detail(tid, detail_state="failed")
                     self.client.log(f"[detail] tid={tid} ✗ {res.get('error')}")
-                # 成功：**不逐帖打**，交给每 5 秒一行的进度（用户要求）
+                else:
+                    # ★ 成功也**逐帖打**（2026-10-25 用户第二次要求）
+                    #   用户原话：「管理员自己运行跑详情采集的时候，
+                    #   建议日志的显示与 Agent 日志相似，不然会有一种"如跑"的感觉」
+                    #   → 与 agent 端**同一个格式**（agent 端因为助手面板要数
+                    #     「已完成 N 帖」，一直保留着逐帖行）：
+                    #       tid=12345 ✓ 2 页 / 8 楼 / 356 字
+                    self.client.log(
+                        f"[detail] tid={tid} ✓ {res.get('pages')} 页 / "
+                        f"{res.get('posts')} 楼 / {res.get('chars')} 字")
                 progress()
 
         threads = []
@@ -632,6 +663,27 @@ class DetailCollector:
                                   daemon=True)
             th.start()
             threads.append(th)
+
+        # ★★ 独立心跳线程（2026-10-25 用户反馈「看着像如跑」）
+        #   原来进度行是在**采完一帖之后**才检查时间要不要打 →
+        #   只要有一帖卡住（站方慢、复验重试、或某个帖特别大），
+        #   整个任务就**长时间一行都不出** → 界面看着像死了。
+        #   → 改成独立线程：只要任务还活着，每 5 秒必有一行进度，
+        #     与采不采完一帖无关。
+        def _ticker() -> None:
+            while True:
+                with lock:
+                    if state.get("_finished"):
+                        return
+                time.sleep(1)
+                # ★ 不 force —— 由 _progress 自己按 PROGRESS_INTERVAL（5 秒）节流
+                #   （force=True 会变成每秒一行，刷屏）
+                progress()
+
+        tick = threading.Thread(target=_ticker, name="detail-ticker",
+                                daemon=True)
+        tick.start()
+
         try:
             for th in threads:
                 th.join()
@@ -640,6 +692,9 @@ class DetailCollector:
             self.client.log("[detail] 收到中断，等各路收尾…")
             for th in threads:
                 th.join(timeout=10)
+        finally:
+            with lock:
+                state["_finished"] = True
         el = time.time() - t_start
         done, failed = state["done"], state["failed"]
         restricted = state["restricted"]
@@ -902,6 +957,8 @@ class DetailCollector:
                     out["warnings"].append({
                         "tid": r["tid"], "posts": uniq, "warnings": warns})
         return out
+
+
 
 
 

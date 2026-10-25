@@ -256,7 +256,10 @@ $$('#tabs button').forEach(btn => {
       ensurePickers();
       showSub('jobs');
     }
-    if (btn.dataset.tab === 'integrity') runIntegrity();
+    // ★ 体检页签**不自动跑**（2026-10-25 用户反馈「打开就卡」）
+    //   体检要扫全库（60 万帖量级），自动触发会让页面请求一直挂着。
+    //   → 改成手动：点「开始体检」才跑，且跑在后台任务里，页面不挂死。
+    if (btn.dataset.tab === 'integrity') showIntegrityIdle();
     if (btn.dataset.tab === 'log') loadLog();
   };
 });
@@ -768,6 +771,26 @@ const deptDict = { depts: [], byCode: {} };
 const pickers = [];
 /** 服务端能力探测：旧进程不认识新字段时必须降级，不能静默忽略 */
 const serverCaps = { pending: false };
+
+/* ★ 每个部门还欠多少详情（详情采集的部门选择器显示用，2026-10-25 加）
+   —— 原来那里显示的是部门编号 typeid，看着像「已采页数」，容易误解。 */
+let deptPending = { counts: {}, loaded: false };
+
+function deptPendingCount(typeid) {
+  const n = deptPending.counts[String(typeid)];
+  return typeof n === 'number' ? n : 0;
+}
+
+/** 拉一次「各部门待采详情数」（只拉一次，之后靠本地缓存） */
+async function loadDeptPending() {
+  try {
+    const r = await api('/api/pending-by-dept');
+    deptPending = { counts: (r && r.counts) || {}, loaded: true };
+  } catch (e) {
+    deptPending = { counts: {}, loaded: false };
+  }
+  pickers.forEach(renderPicker);
+}
 /**
  * 采集节点标识 = **当前登录者自己的节点号**。
  * 管理员本机 = "admin"；成员 = "member:xxx@example.com"。
@@ -806,6 +829,9 @@ function createPicker(rootId, opts) {
     countEl: root.querySelector('.dp-count'),
     searchEl: root.querySelector('.dp-search'),
     onChange: (opts && opts.onChange) || null,
+    // ★ 'detail' 模式：部门名后面显示「该部门还欠多少详情」
+    //   （原来显示的是部门编号 typeid，看着像「已采页数」，容易误解）
+    mode: (opts && opts.mode) || 'list',
   };
   pickers.push(P);
 
@@ -858,11 +884,22 @@ function renderPicker(P) {
         <input type="checkbox" class="pg-all" ${list.length && selIn === list.length ? 'checked' : ''}>
         ${esc(g.name)} <span class="dim">(${cnt})</span>
       </label>
-      <div class="pg-items">${list.map(d => `
-        <label class="pg-i ${P.sel.has(d.typeid) ? 'on' : ''}">
+      <div class="pg-items">${list.map(d => {
+        // ★ 详情采集：部门名后面显示「还欠多少详情」；部门编号放进 title（备查）
+        if (P.mode === 'detail') {
+          const n = deptPendingCount(d.typeid);
+          const tail = n > 0
+            ? `<span class="tid">欠 ${n.toLocaleString()} 帖详情</span>`
+            : '<span class="tid">详情已采完</span>';
+          return `<label class="pg-i ${P.sel.has(d.typeid) ? 'on' : ''}">
+            <input type="checkbox" data-tid="${esc(d.typeid)}" ${P.sel.has(d.typeid) ? 'checked' : ''}>
+            ${esc(d.name)} ${tail}</label>`;
+        }
+        return `<label class="pg-i ${P.sel.has(d.typeid) ? 'on' : ''}">
           <input type="checkbox" data-tid="${esc(d.typeid)}" ${P.sel.has(d.typeid) ? 'checked' : ''}>
-          ${esc(d.name)} <span class="tid">${esc(d.typeid)}</span>
-        </label>`).join('')}</div>
+          ${esc(d.name)} <span class="tid" title="部门编号（不是页数）">${esc(d.typeid)}</span>
+        </label>`;
+      }).join('')}</div>
     </div>`;
   }).join('');
 
@@ -1017,9 +1054,12 @@ async function probeServerCaps() {
 function ensurePickers() {
   if (pickers.length) { pickers.forEach(renderPicker); return; }
   createPicker('picker-list', { onChange: updateListEstimate });
-  createPicker('picker-detail', { onChange: updateDetailEstimate });
+  // ★ 详情采集的 picker 显示「各部门还欠多少详情」
+  createPicker('picker-detail', { onChange: updateDetailEstimate, mode: 'detail' });
   createPicker('picker-assist', { onChange: () => {} });
   pickers.forEach(renderPicker);
+  // 拉一次各部门待采数（拉不到也不影响功能，只是标签退回显示部门编号）
+  loadDeptPending();
 }
 
 async function startJob(path, body, label) {  try {
@@ -1387,12 +1427,53 @@ function intSetSel(tids, on) {
   intSelInfo();
 }
 
+/* 体检页的空闲态：说明为什么要手动点（2026-10-25 用户反馈「打开就卡」）。 */
+function showIntegrityIdle() {
+  const out = $('#integrity-out');
+  if (!out) return;
+  if (out.dataset.state === 'done') return;      // 已经有结果了，别覆盖
+  out.innerHTML = '<p class="hint">体检要扫描<b>全库</b>详情帖（60 万帖量级），'
+    + '自动跑会把页面卡住，所以改成<b>手动触发</b>。<br>'
+    + '点上面的「<b>开始体检</b>」按钮即可 —— 体检跑在后台，'
+    + '页面不会卡死，跑完自动出结果。</p>';
+}
+
+/* 手动触发：起一个后台体检任务，然后轮询到结束再渲染。
+   ★ 不再直接 GET /api/integrity（同步全库扫描，浏览器请求会一直挂着）。 */
 async function runIntegrity() {
   const out = $('#integrity-out');
   if (!out) return;
-  out.innerHTML = '<p class="hint">体检中…</p>';
+  const btn = $('#btn-integrity');
+  if (btn) btn.disabled = true;
+  out.dataset.state = 'running';
+  out.innerHTML = '<p class="hint">体检中…（后台扫描全库，页面可以继续用；'
+    + '跑完自动出结果）</p>';
   try {
-    const r = await api('/api/integrity');
+    const d = await api('/api/integrity/run', { method: 'POST' });
+    if (!d || !d.job || !d.job.id) throw new Error('启动体检失败');
+    const jid = d.job.id;
+    let j = null;
+    for (let i = 0; i < 360; i++) {              // 最多等 30 分钟
+      await new Promise(r => setTimeout(r, 3000));
+      j = await api('/api/jobs/' + jid);
+      if (j.state !== 'running') break;
+    }
+    if (!j || j.state === 'running') {
+      throw new Error('体检还没跑完（可能耗时较长），过一会儿再点一次看看');
+    }
+    if (j.state === 'failed') throw new Error(j.error || '体检失败');
+    const r = j.result || {};
+    await renderIntegrity(r, out);
+  } catch (e) {
+    out.dataset.state = 'idle';
+    out.innerHTML = `<div class="errbox">体检失败：${esc(e.message)}</div>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function renderIntegrity(r, out) {
+  {
     let lc = { items: [], counts: {} };
     try { lc = await api('/api/list-changes?limit=200'); } catch (e) { /* 留痕表可能还没建 */ }
     let html = `<div class="okbox">检查 ${r.checked} 帖 · 通过 ${r.ok} 帖 · 问题 ${r.problems.length} 条`
@@ -1482,6 +1563,7 @@ async function runIntegrity() {
       html += '<div class="okbox">全部干净。</div>';
     }
     out.innerHTML = html;
+    out.dataset.state = 'done';
     $$('#integrity-out input[data-tid]').forEach(cb => {
       cb.onchange = intSelInfo;
     });
@@ -1491,8 +1573,6 @@ async function runIntegrity() {
       growth: (r.growth || []).map(g => g.tid),
       warnings: r.warnings.map(w => w.tid),
     };
-  } catch (e) {
-    out.innerHTML = `<div class="errbox">体检失败：${esc(e.message)}</div>`;
   }
 }
 $('#btn-integrity').onclick = runIntegrity;
