@@ -220,6 +220,9 @@ class Agent:
         self._submit_fail_streak = 0
         #: ★ 收到停止指令后置位（并发时用来叫停各路）
         self._stop_now = False
+        #: 进度行的节流时间（2026-10-25）
+        self._last_progress = 0.0
+        self._prog_start = 0.0
         #: 每个线程一份 HTTP 会话（requests.Session 不适合多线程共用）
         self._tls = threading.local()
         #: 本机采集（指定帖）路径的计数（并发时共享 → 加锁）
@@ -1068,6 +1071,7 @@ class Agent:
         if tids:
             code = f"LOCAL:{self.node or 'member'}"
             self._c_local_ok = self._c_local_failed = self._c_local_restricted = 0
+            self._progress_reset()
             if self.workers > 1:
                 # ★ 并发采这些帖（2026-10-25 加）
                 #   每线程：自己的 HTTP 会话、自己的内存库、自己的 Client
@@ -1076,7 +1080,10 @@ class Agent:
                 results, errors = run_parallel(
                     tids, lambda t: self._collect_local_tid(t, code),
                     workers=self.workers,
-                    should_stop=lambda: self.link_lost)
+                    should_stop=lambda: self.link_lost,
+                    on_result=lambda it, r: self._progress_line(
+                        self._c_local_ok + self._c_local_failed + self._c_local_restricted,
+                        len(tids), "本机"))
                 for t, e in errors:
                     self.log(f"✗ tid={t} 失败：{type(e).__name__}: {e}")
                     with self._lock:
@@ -1087,6 +1094,9 @@ class Agent:
                         self.log("与控制面失联 → 停止本机采集。")
                         break
                     self._collect_local_tid(tid, code)
+                    self._progress_line(
+                        self._c_local_ok + self._c_local_failed + self._c_local_restricted,
+                        len(tids), "本机")
             out["detail_ok"] += self._c_local_ok
             out["detail_restricted"] += self._c_local_restricted
             out["detail_failed"] += self._c_local_failed
@@ -1266,6 +1276,27 @@ class Agent:
             attr = "_c_" + key
             setattr(self, attr, getattr(self, attr) + 1)
 
+    def _progress_line(self, processed: int, total: int, label: str) -> None:
+        """进度行（2026-10-25 用户要求「只打进度…还剩下多少篇」）。
+
+        ★ agent 端**保留**逐帖日志
+          本机助手面板靠 `tid=\\d+ ✓` 这条正则数「已完成 N 帖」——
+          去掉逐帖行，面板会永远显示 0（实测踩过）。
+          → 逐帖行照旧，另加每 5 秒一行的进度（带剩余量）。
+        """
+        now = time.time()
+        if now - self._last_progress < 5.0:
+            return
+        self._last_progress = now
+        left = max(0, total - processed)
+        rate = processed / max(0.001, now - self._prog_start)
+        self.log(f"[{label}] 进度：已采 {processed:,} 帖｜还剩 {left:,} 帖"
+                 f"｜用时 {now - self._prog_start:.0f}s｜{rate:.1f} 帖/秒")
+
+    def _progress_reset(self) -> None:
+        self._last_progress = time.time()
+        self._prog_start = self._last_progress
+
     def _process_pick(self, p: Dict[str, Any]) -> str:
         """采一条领到的活并回传。
 
@@ -1430,6 +1461,8 @@ class Agent:
                 #   （正则 /领走 (\d+) 帖/）。不打的话面板永远显示 0，
                 #   用户看着就像"什么都没采"（实测踩过，正是用户反馈的那点）。
                 self.log(f"领走 {len(picks)} 帖")
+                self._progress_reset()      # 进度行（每 5 秒一行，带剩余量）
+                _processed = [0]
                 if self.workers > 1:
                     # ★ 并发采这一批领到的活（2026-10-25 加）
                     #   并发单位是**一帖**（同帖的详情页→ajax 必须贴在一起）。
@@ -1438,7 +1471,10 @@ class Agent:
                     from .parallel import run_parallel
                     results, errors = run_parallel(
                         picks, self._process_pick, workers=self.workers,
-                        should_stop=lambda: self.link_lost or self._stop_now)
+                        should_stop=lambda: self.link_lost or self._stop_now,
+                        on_result=lambda it, r: self._progress_line(
+                            self._c_done + self._c_failed + self._c_restricted,
+                            len(picks), "协作"))
                     for p_, e in errors:
                         self.log(f"✗ {p_.get('task_code')} tid={p_.get('tid')} "
                                  f"失败：{type(e).__name__}: {e}")
@@ -1448,6 +1484,9 @@ class Agent:
                 else:
                     for p in picks:
                         r = self._process_pick(p)
+                        self._progress_line(
+                            self._c_done + self._c_failed + self._c_restricted,
+                            len(picks), "协作")
                         if r == "stop":
                             stopped_by_link = True
                             break

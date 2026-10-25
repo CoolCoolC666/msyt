@@ -79,6 +79,20 @@ st, d = call(BASE + "/api/agent/workers", tok=atok, body={"workers": 2},
 check("管理员改服务器默认 → 200", st == 200 and d.get("workers") == 2, f"{st} {d}")
 st, d = call(BASE + "/api/agent/workers", tok=atok)
 check("读回是 2", d.get("workers") == 2, str(d.get("workers")))
+# ★ 先停掉正在跑的 detail 任务：**同节点互斥**，不先停会 409
+#   停止是**异步收尾**的 → 要轮询等它真的停下（实测停了仍会 409 几秒）
+for _ in range(30):
+    jobs = call(BASE + "/api/jobs", tok=atok)[1]
+    running = [j for j in jobs.get("items", [])
+               if j.get("state") == "running" and j.get("kind") == "detail"]
+    if not running:
+        break
+    for j in running:
+        call(BASE + f"/api/jobs/{j['id']}/stop", tok=atok, method="POST")
+    time.sleep(2)
+else:
+    print("      （在跑的 detail 任务停不掉，跳过采集任务那部分）")
+
 conn = sqlite3.connect(os.path.join(PKG, "data", "msyt.db"))
 conn.row_factory = sqlite3.Row
 tids = [int(r["tid"]) for r in conn.execute(

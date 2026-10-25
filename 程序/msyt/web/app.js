@@ -1291,7 +1291,7 @@ async function loadJobs() {
       <span class="badge ${st}">${esc(j.state)}</span>
       <span class="node">${esc(j.node || 'admin')}</span>
       <span class="p">${esc(p)}</span>
-      <span class="st">${j.elapsed}s · ${j.log_count} 行日志</span>
+      <span class="st">${j.elapsed}s · ${j.log_count} 行日志${jobProgressText(j)}</span>
       ${j.state === 'running'
         ? `<button class="tiny danger" data-stop="${j.id}">停止</button>` : ''}
     </div>`;
@@ -1335,6 +1335,24 @@ async function showJobLog(jid) {
   } catch (e) { /* 任务可能已被清理 */ }
 }
 
+/* ---------------- 任务卡片上的进度（2026-10-25）
+   ★ 用户要「清楚还剩下多少篇」→ 直接显示在卡片上，不用去翻日志。
+   ★ 数据来自 /api/jobs 的 last_progress（列表接口的 logs 是空的，
+     所以服务端单独把最后一条「进度：」行摘出来给前端）。 */
+function jobProgressText(j) {
+  const t = (j && j.last_progress) || '';
+  if (!t) return '';
+  const m = t.match(/已采\s*([\d,]+)\s*帖/);
+  const r = t.match(/队列还剩\s*([\d,]+)\s*帖/);
+  const g = t.match(/本次目标\s*([\d,]+)\s*帖/);
+  if (!m && !r) return '';
+  const bits = [];
+  if (m) bits.push('已采 ' + m[1]);
+  if (g) bits.push('目标 ' + g[1]);
+  if (r) bits.push('还剩 ' + r[1]);
+  return ' · ' + bits.join('，');
+}
+
 function pollJobs() {
   if (state.jobTimer) clearInterval(state.jobTimer);
   state.jobTimer = setInterval(async () => {
@@ -1347,7 +1365,7 @@ function pollJobs() {
       loadHealth();
       if (!running.length) { clearInterval(state.jobTimer); state.jobTimer = null; }
     } catch (_) {}
-  }, 2000);
+  }, 5000);       // ★ 2026-10-25：2 秒 → 5 秒（用户要求「每5-10s刷新一次」）
 }
 
 /* ------------------------------------------------------------------ 体检 */
@@ -2294,7 +2312,7 @@ async function pollHelper() {
     // ★ 同步「先起 Agent」引导卡上的状态徽章（2026-10-23 加）
     setAgentFirstState(r, picked, done);
   };
-  _helperTimer = setInterval(once, 3000);
+  _helperTimer = setInterval(once, 5000);   // ★ 2026-10-25：3 秒 → 5 秒
   once();          // ★ 立即探一次，别让用户对着「正在探测…」干等 3 秒
 }
 

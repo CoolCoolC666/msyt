@@ -52,6 +52,13 @@ GAP_RETRY_MAX = 2
 #: 补采次数在 detail_warn 里的记号
 GAP_RETRY_MARK = "已补采"
 
+#: ★ 并发采集时**进度日志的刷新间隔**（秒）—— 2026-10-25 用户要求
+#:   「加上一个只打进度不逐帖打」「大概每5-10s刷新一次」
+#:
+#:   为什么不能逐帖打：3 路并发时每秒出 2 帖，逐帖打 → 日志每秒滚 2 行，
+#:   几百行就把日志框刷没了，**看不出还剩多少**。
+PROGRESS_INTERVAL = 5.0
+
 
 def _short(text: str, n: int = 60) -> str:
     """把提示文字**截短**（2026-10-25 加）。
@@ -426,11 +433,67 @@ class DetailCollector:
         return self._run_parallel(limit, max_attempts, should_stop, n)
 
     # ------------------------------------------------------------------
+    def _make_progress(self, state: Dict, lock, t_start: float,
+                       limit: int, workers: int):
+        """生成一个「**每 PROGRESS_INTERVAL 秒打一行进度**」的函数。
+
+        ★ 用户要求（2026-10-25）
+          「加上一个只打进度不逐帖打」「这样子可以清楚，还剩下多少篇」
+          → 进度行里必须有：**已采 / 本次目标 / 队列还剩 / 用时 / 速率**。
+        ★ 「队列还剩」查的是 detail_queue 里 state='pending' 的总数
+          （索引 idx_dq_state 走 → 5 秒一次不心疼）。
+        """
+        last = [time.time()]
+
+        def _queue_left() -> int:
+            """队列里还剩多少帖可采。
+
+            ★ 必须用**当前线程**的连接
+              sqlite3 的连接不能跨线程（check_same_thread 默认开），
+              用主线程那条会被直接拒绝 → 只能拿到 -1。
+            """
+            try:
+                conn = self.for_thread().db.conn
+                return int(conn.execute(
+                    "SELECT COUNT(*) FROM detail_queue WHERE state='pending'"
+                ).fetchone()[0])
+            except Exception:                             # noqa: BLE001
+                return -1
+
+        def _progress(force: bool = False) -> None:
+            now = time.time()
+            if not force and now - last[0] < PROGRESS_INTERVAL:
+                return
+            last[0] = now
+            with lock:
+                d = state.get("done", 0)
+                f = state.get("failed", 0)
+                r = state.get("restricted", 0)
+            el = max(0.001, now - t_start)
+            rate = (d + f + r) / el
+            left = _queue_left()
+            extra = f"｜本次目标 {limit:,} 帖" if limit else ""
+            self.client.log(
+                f"[detail] 进度：已采 {d:,} 帖（失败 {f}、站方限制 {r}）{extra}"
+                f"｜队列还剩 {left:,} 帖｜用时 {el:.0f}s｜{rate:.1f} 帖/秒")
+
+        return _progress
+
+    # ------------------------------------------------------------------
     def _run_serial(self, limit: int, max_attempts: int, should_stop) -> Dict:
-        """串行采集（**默认路径**，与并发改造前行为逐条一致）。"""
+        """串行采集（**默认路径**）。
+
+        ★ 日志节奏（2026-10-25 用户要求「只打进度不逐帖打」）
+          串行也**保留**逐帖成功日志（它本来就慢、每秒一行不多），
+          **另外**每 5 秒补一行进度（已采 / 还剩多少）→
+          两边行为一致，用户看哪种都行。
+        """
         done = failed = restricted = 0
         stopped = False
         t_start = time.time()
+        state = {"done": 0, "failed": 0, "restricted": 0}
+        lock = threading.Lock()
+        progress = self._make_progress(state, lock, t_start, limit, 1)
         while True:
             if should_stop is not None and should_stop():
                 stopped = True
@@ -447,20 +510,24 @@ class DetailCollector:
                                    max_attempts=max_attempts)
             if res["ok"]:
                 done += 1
+                state["done"] = done
                 self.client.log(
                     f"[detail] tid={tid} ✓ {res['pages']} 页 / {res['posts']} 楼 / "
                     f"{res['chars']} 字")
             elif res.get("restricted"):
                 # ★ 站方限制：正文不公开 —— 已标记 + 写入正文，但**不算失败**
                 restricted += 1
+                state["restricted"] = restricted
                 self.db.set_detail_state(tid, "restricted", res.get("reason", ""))
                 self.client.log(f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
                                 f"（已标记，不计入已采详情帖）")
             else:
                 failed += 1
+                state["failed"] = failed
                 self.db.set_detail_state(tid, "failed", res.get("error", ""))
                 self.db.set_thread_detail(tid, detail_state="failed")
                 self.client.log(f"[detail] tid={tid} ✗ {res.get('error')}")
+            progress()
         el = time.time() - t_start
         self.client.log(f"[detail] 完成 {done} 帖，站方限制 {restricted} 帖，"
                         f"失败 {failed} 帖，用时 {el:.0f}s")
@@ -489,6 +556,12 @@ class DetailCollector:
         t_start = time.time()
         self.client.log(f"[detail] 并发采集启动：{workers} 路"
                         f"（每路独立限速 {self.cfg.interval}s）")
+
+        # ★ 进度日志（2026-10-25 用户要求「只打进度不逐帖打」）
+        #   每 PROGRESS_INTERVAL 秒打一行：已采多少 / 队列还剩多少 / 速率。
+        #   逐帖成功的日志去掉（并发时每秒 2 行，会把日志框刷没）；
+        #   **失败与站方限制仍逐帖打** —— 那是有价值的信息，不能被进度吞掉。
+        progress = self._make_progress(state, lock, t_start, limit, workers)
 
         def _worker() -> None:
             nonlocal stopped
@@ -542,17 +615,16 @@ class DetailCollector:
                 # ② 状态落库（db 自己的共享写锁 → 串行、线程安全）
                 if kind == "restricted":
                     db.set_detail_state(tid, "restricted", res.get("reason", ""))
-                    msg = (f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
-                           f"（已标记，不计入已采详情帖）")
+                    # ★ 受限/失败**仍逐帖打**（有价值的信息，不能被进度吞掉）
+                    self.client.log(
+                        f"[detail] tid={tid} ⊘ 站方限制：{_short(res.get('reason'))}"
+                        f"（已标记，不计入已采详情帖）")
                 elif kind == "failed":
                     db.set_detail_state(tid, "failed", res.get("error", ""))
                     db.set_thread_detail(tid, detail_state="failed")
-                    msg = f"[detail] tid={tid} ✗ {res.get('error')}"
-                else:
-                    msg = (f"[detail] tid={tid} ✓ {res['pages']} 页 / "
-                           f"{res['posts']} 楼 / {res['chars']} 字")
-                # ③ 打日志（锁外，避免长时间持锁）
-                self.client.log(msg)
+                    self.client.log(f"[detail] tid={tid} ✗ {res.get('error')}")
+                # 成功：**不逐帖打**，交给每 5 秒一行的进度（用户要求）
+                progress()
 
         threads = []
         for i in range(workers):
@@ -571,6 +643,8 @@ class DetailCollector:
         el = time.time() - t_start
         done, failed = state["done"], state["failed"]
         restricted = state["restricted"]
+        # 不用 force 再打一行进度：紧接着的「完成 N 帖」那行已经总结了，
+        # 再打一遍会出现两行几乎一样的（实测 47s 时重复了一次）。
         self.client.log(f"[detail] 完成 {done} 帖（{workers} 路并发），"
                         f"站方限制 {restricted} 帖，失败 {failed} 帖，用时 {el:.0f}s")
         return {"done": done, "failed": failed, "restricted": restricted,
@@ -828,5 +902,6 @@ class DetailCollector:
                     out["warnings"].append({
                         "tid": r["tid"], "posts": uniq, "warnings": warns})
         return out
+
 
 

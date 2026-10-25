@@ -180,7 +180,17 @@ class Job:
 
     def to_dict(self, tail: int = 200) -> Dict[str, Any]:
         with self._lock:
-            lines = list(self.logs)[-tail:]
+            all_logs = list(self.logs)
+            lines = all_logs[-tail:] if tail else []
+            # ★ 最后一条**进度行**（2026-10-25 加）
+            #   任务卡片上要直接显示「已采 N 帖，还剩 M 帖」，
+            #   而列表接口的 logs 是空的（tail=0）→ 单独把进度行摘出来。
+            last_progress = ""
+            for x in reversed(all_logs[-60:]):
+                m = str(x.get("m") or "")
+                if "进度：" in m:
+                    last_progress = m
+                    break
         d = {
             "id": self.id,
             "kind": self.kind,
@@ -194,6 +204,7 @@ class Job:
             "error": self.error,
             "stop_requested": self.stop_requested,
             "log_count": len(self.logs),
+            "last_progress": last_progress,
         }
         d["logs"] = lines
         return d

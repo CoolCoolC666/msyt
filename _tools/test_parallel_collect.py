@@ -104,12 +104,51 @@ check("detail 并发路径用 run 的独立 client",
       "self.for_thread()" in detail_src)
 check("webapp 把 workers 传给 dc.run（取**服务端设置**，可网页改）",
       "workers=_detail_workers()" in webapp_src)
+
+print()
+print("### ② 日志节奏：只打进度、不逐帖打（2026-10-25 用户要求）")
+check("有进度间隔常量（5 秒）",
+      "PROGRESS_INTERVAL = 5.0" in detail_src)
+check("进度行里有「队列还剩」（用户要「还剩多少篇」）",
+      "队列还剩" in detail_src)
+check("进度行里有已采 / 目标 / 用时 / 速率",
+      "已采" in detail_src and "本次目标" in detail_src
+      and "帖/秒" in detail_src)
+check("进度行只查一次队列（每 5 秒一次，不心疼）",
+      "SELECT COUNT(*) FROM detail_queue WHERE state='pending'" in detail_src)
+# 并发路径里**成功**不再逐帖打（受限/失败仍逐帖打）
+_par = detail_src.split("def _run_parallel")[-1]
+check("并发路径不再逐帖打「成功」日志",
+      "✓ {res['pages']} 页" not in _par)
+check("并发路径仍逐帖打「站方限制」",
+      "⊘ 站方限制" in _par)
+check("并发路径仍逐帖打「失败」",
+      "✗ {res.get('error')}" in _par)
+appjs = open(os.path.join(PKG, "msyt", "web", "app.js"), encoding="utf-8").read()
+check("网页任务轮询 5 秒（用户要 5-10s 刷新）",
+      "}, 5000);       // ★ 2026-10-25" in appjs)
+check("网页助手轮询 5 秒",
+      "setInterval(once, 5000)" in appjs)
 check("agent 有 workers 参数", "workers: int = 1" in agent_src)
 check("agent 有 _process_pick（串行/并发共用）",
       "def _process_pick" in agent_src)
 check("agent 有 _session_for_thread（每线程独立会话）",
       "def _session_for_thread" in agent_src)
 check("agent 计数加锁", "def _bump" in agent_src and "self._lock" in agent_src)
+
+print()
+print("### ③ 任务卡片直接显示「还剩多少」（2026-10-25 补）")
+webapp_src = open(os.path.join(PKG, "msyt", "webapp.py"), encoding="utf-8").read()
+check("服务端给任务带 last_progress 字段",
+      '"last_progress": last_progress' in webapp_src)
+check("last_progress 是从日志里摘最后一条「进度：」行",
+      'if "进度：" in m' in webapp_src)
+check("前端有 jobProgressText（把进度拼到卡片上）",
+      "function jobProgressText" in appjs)
+check("卡片渲染里用到了 jobProgressText",
+      "jobProgressText(j)" in appjs)
+check("前端取「已采 / 目标 / 还剩」三个数",
+      "已采" in appjs and "队列还剩" in appjs)
 check("并发上限写在文档里（3 路最优点）",
       "3 路" in config_src and "123,000" in config_src)
 
