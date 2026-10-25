@@ -93,6 +93,18 @@ class ListRow:
     last_reply_time: str = ""
     last_reply_ts: int = 0
 
+    #: ★ 这一行是不是来自**全局公告区**（`#msbgt`），而不是帖子行？
+    #:
+    #: 为什么要有这个标记（2026-10-24 踩过）：
+    #:   同一个 tid 在站方不同板块列表页里，**站方给的标题不一样**：
+    #:     · 主板块的**置顶行**：「必读公告：中国宁波网民生e点通（天一论坛"我要问政"）管理规定」
+    #:     · 公告区（每个板块页都有）  ：「中国宁波网民生e点通群众留言板（天一论坛问政频道）管理规定」
+    #:   而 upsert 是**覆盖式**的 → 后采的源会把先采的盖掉，
+    #:   标题来回变不说，公告行的 author/replies/pub_time **全是空**，
+    #:   一并把帖行的真值也盖成空（实测 6177045 的 author、replies 被清成空/0）。
+    #:   → 公告行**只允许「填空」，不允许「覆盖」**（见 db.upsert_threads）。
+    is_announcement: int = 0
+
     def as_tuple(self) -> tuple:
         return (self.tid, self.title, self.url, self.category, self.state,
                 self.dept_id, self.dept_name, ",".join(self.extra_dept_ids),
@@ -188,7 +200,8 @@ def parse_announcements(soup, list_url: str = "") -> List[ListRow]:
         if not title:
             continue
         seen.add(tid)
-        out.append(ListRow(tid=tid, title=title, url=_abs_url(href, list_url)))
+        out.append(ListRow(tid=tid, title=title, url=_abs_url(href, list_url),
+                           is_announcement=1))
     return out
 
 

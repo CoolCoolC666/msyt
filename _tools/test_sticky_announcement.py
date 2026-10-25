@@ -188,6 +188,51 @@ check("公告条目只有标题与链接（类别/部门留空）",
       all(a.category == "" and a.dept_id == "" for a in ann))
 
 print()
+print("### ⑤ 公告行**不得覆盖**帖行已有的真值（2026-10-24 踩过）")
+check("公告行带 is_announcement=1 标记", all(a.is_announcement == 1 for a in ann))
+check("普通帖行 is_announcement=0",
+      all(r.is_announcement == 0 for r in rows if r.tid in (8344484, 8344485, 8333204)))
+check("置顶帖行 is_announcement=0", by[6177045].is_announcement == 0)
+
+# 真库上验一遍：公告行写入后，标题/作者/回复数必须原样不动
+import shutil                                        # noqa: E402
+import tempfile                                      # noqa: E402
+
+from msyt.db import DB                                # noqa: E402
+
+_tmp = tempfile.mkdtemp(prefix="msyt-ann-test-")
+try:
+    db = DB(os.path.join(_tmp, "t.db"))
+    # 先写一条「帖行」版本（有完整元数据）
+    db.upsert_threads([by[6177045]])
+    r0 = db.conn.execute(
+        "SELECT title,author,replies FROM threads WHERE tid=?", (6177045,)).fetchone()
+    # 再写同一 tid 的「公告行」版本（只有标题，其余全空）
+    ann_row = [a for a in ann if a.tid == 6177045][0]
+    ann_row.title = "中国宁波网民生e点通群众留言板（天一论坛问政频道）管理规定"
+    db.upsert_threads([ann_row])
+    r1 = db.conn.execute(
+        "SELECT title,author,replies FROM threads WHERE tid=?", (6177045,)).fetchone()
+    check("公告行写入后标题不变（不能换成公告区简称）",
+          r0["title"] == r1["title"],
+          f"{r0['title'][:24]!r} → {r1['title'][:24]!r}")
+    check("公告行写入后作者不变（不能被清空）",
+          r0["author"] == r1["author"] and r1["author"] != "",
+          f"{r0['author']!r} → {r1['author']!r}")
+    check("公告行写入后回复数不变（不能被清成 0）",
+          r0["replies"] == r1["replies"] and r1["replies"] != 0,
+          f"{r0['replies']} → {r1['replies']}")
+    # 反向：帖行仍然要能覆盖公告行的简称
+    db.upsert_threads([by[6177045]])
+    r2 = db.conn.execute(
+        "SELECT title FROM threads WHERE tid=?", (6177045,)).fetchone()
+    check("帖行仍能覆盖公告区的简称标题",
+          r2["title"] == by[6177045].title, r2["title"][:30])
+    db.conn.close()
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+print()
 print("=" * 70)
 print(f"结果：{OK} 通过 / {FAIL} 失败")
 sys.exit(1 if FAIL else 0)

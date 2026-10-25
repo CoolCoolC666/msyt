@@ -576,7 +576,18 @@ class DB:
     )
 
     def upsert_threads(self, rows: Iterable) -> int:
-        """写入列表页元数据。**不覆盖**详情页补全的字段。"""
+        """写入列表页元数据。**不覆盖**详情页补全的字段。
+
+        ★ 公告行（`#msbgt`）**只允许填空，不允许覆盖**（2026-10-24 加）
+          理由：同一个 tid 在站方不同板块列表页里，**站方给的标题不一样**
+            · 主板块置顶行：「必读公告：中国宁波网民生e点通（天一论坛"我要问政"）管理规定」
+            · 公告区（每个板块页都有）：「中国宁波网民生e点通群众留言板（…）管理规定」
+          而公告行除标题外，**author / replies / pub_time / 部门…全是空**。
+          若按普通行那样覆盖式写入，就会把帖行的真值**清成空**
+          （实测 6177045 的 author、replies 被清成空/0，标题也被换成简称）。
+          → 公告行走另一条 SQL：冲突时**只补空字段**，已有真值一律保留。
+          → 帖行（正常行）仍照常覆盖 —— 它的信息本来就是最新的。
+        """
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         n = 0
         with self.lock:
@@ -589,26 +600,64 @@ class DB:
                         (r.pub_time or "")[:10], r.pub_ts, r.replies, r.views,
                         r.has_image, r.last_reply_by, r.last_reply_time,
                         r.last_reply_ts)
-                cur = self.conn.execute(
-                    f"""INSERT INTO threads ({self.THREAD_COLS})
-                        VALUES ({','.join('?' * len(vals))})
-                        ON CONFLICT(tid) DO UPDATE SET
-                          title=excluded.title, url=excluded.url,
-                          category=excluded.category, state=excluded.state,
-                          dept_id=excluded.dept_id, dept_name=excluded.dept_name,
-                          extra_dept_ids=excluded.extra_dept_ids,
-                          extra_dept_names=excluded.extra_dept_names,
-                          mailbox_id=excluded.mailbox_id, mailbox_name=excluded.mailbox_name,
-                          light_code=excluded.light_code, light_name=excluded.light_name,
-                          author=excluded.author, pub_time=excluded.pub_time,
-                          pub_day=excluded.pub_day, pub_ts=excluded.pub_ts,
-                          replies=excluded.replies, views=excluded.views,
-                          has_image=excluded.has_image,
-                          last_reply_by=excluded.last_reply_by,
-                          last_reply_time=excluded.last_reply_time,
-                          last_reply_ts=excluded.last_reply_ts,
-                          updated_at=?""",
-                    vals + (now,))
+                if getattr(r, "is_announcement", 0):
+                    # 公告行：**只填空**，不覆盖已有真值
+                    cur = self.conn.execute(
+                        f"""INSERT INTO threads ({self.THREAD_COLS})
+                            VALUES ({','.join('?' * len(vals))})
+                            ON CONFLICT(tid) DO UPDATE SET
+                              title=CASE WHEN COALESCE(threads.title,'')=''
+                                         THEN excluded.title ELSE threads.title END,
+                              url=CASE WHEN COALESCE(threads.url,'')=''
+                                       THEN excluded.url ELSE threads.url END,
+                              author=CASE WHEN COALESCE(threads.author,'')=''
+                                          THEN excluded.author ELSE threads.author END,
+                              author_uid=CASE WHEN COALESCE(threads.author_uid,'')=''
+                                              THEN excluded.author_uid
+                                              ELSE threads.author_uid END,
+                              pub_time=CASE WHEN COALESCE(threads.pub_time,'')=''
+                                            THEN excluded.pub_time ELSE threads.pub_time END,
+                              pub_day=CASE WHEN COALESCE(threads.pub_day,'')=''
+                                          THEN excluded.pub_day ELSE threads.pub_day END,
+                              pub_ts=CASE WHEN COALESCE(threads.pub_ts,0)=0
+                                          THEN excluded.pub_ts ELSE threads.pub_ts END,
+                              replies=CASE WHEN COALESCE(threads.replies,0)=0
+                                           THEN excluded.replies ELSE threads.replies END,
+                              views=CASE WHEN COALESCE(threads.views,0)=0
+                                         THEN excluded.views ELSE threads.views END,
+                              dept_id=CASE WHEN COALESCE(threads.dept_id,'')=''
+                                           THEN excluded.dept_id ELSE threads.dept_id END,
+                              dept_name=CASE WHEN COALESCE(threads.dept_name,'')=''
+                                             THEN excluded.dept_name
+                                             ELSE threads.dept_name END,
+                              category=CASE WHEN COALESCE(threads.category,'')=''
+                                            THEN excluded.category
+                                            ELSE threads.category END,
+                              state=CASE WHEN COALESCE(threads.state,'')=''
+                                         THEN excluded.state ELSE threads.state END,
+                              updated_at=?""",
+                        vals + (now,))
+                else:
+                    cur = self.conn.execute(
+                        f"""INSERT INTO threads ({self.THREAD_COLS})
+                            VALUES ({','.join('?' * len(vals))})
+                            ON CONFLICT(tid) DO UPDATE SET
+                              title=excluded.title, url=excluded.url,
+                              category=excluded.category, state=excluded.state,
+                              dept_id=excluded.dept_id, dept_name=excluded.dept_name,
+                              extra_dept_ids=excluded.extra_dept_ids,
+                              extra_dept_names=excluded.extra_dept_names,
+                              mailbox_id=excluded.mailbox_id, mailbox_name=excluded.mailbox_name,
+                              light_code=excluded.light_code, light_name=excluded.light_name,
+                              author=excluded.author, pub_time=excluded.pub_time,
+                              pub_day=excluded.pub_day, pub_ts=excluded.pub_ts,
+                              replies=excluded.replies, views=excluded.views,
+                              has_image=excluded.has_image,
+                              last_reply_by=excluded.last_reply_by,
+                              last_reply_time=excluded.last_reply_time,
+                              last_reply_ts=excluded.last_reply_ts,
+                              updated_at=?""",
+                        vals + (now,))
                 n += cur.rowcount or 0
             self.conn.commit()
         return n
