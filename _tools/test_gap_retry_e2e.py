@@ -72,6 +72,28 @@ def make_thread():
     con.close()
 
 
+def cleanup_thread():
+    """★ 把测试帖从**生产库**里彻底删掉（2026-10-25 加）。
+
+    为什么必须清
+      这个测试故意用生产库 —— 因为要验的是服务端 `/api/integrity`
+      对**库里真实那一行**的作用（服务端连的就是生产库）。
+      但代价是：测试造的帖会留在生产库里。
+
+      而 `pub_ts=NULL` 的帖在「先旧后新」排序里 `COALESCE(pub_ts,0)=0`
+      → 永远排**队首** → 被第一个 worker 领走 → 白跑一趟，
+      而且它是人造帖，采回来是空。
+
+      → 所以跑完必须删干净（threads / posts / thread_pages / flows /
+        detail_queue 都要删）。
+    """
+    con = sqlite3.connect(DB)
+    with con:
+        for tbl in ("posts", "thread_pages", "flows", "detail_queue", "threads"):
+            con.execute(f"DELETE FROM {tbl} WHERE tid=?", (TID,))
+    con.close()
+
+
 def state():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
@@ -103,55 +125,62 @@ print("=" * 72)
 
 tok = login()
 make_thread()
-before = state()
-print(f"体检前：state={before['state']}  队列={before['qstate']}  "
-      f"楼层={before['posts']}  告警={before['warn'][:40]!r}")
+try:
+    before = state()
+    print(f"体检前：state={before['state']}  队列={before['qstate']}  "
+          f"楼层={before['posts']}  告警={before['warn'][:40]!r}")
 
-r = integrity(tok)
-after = state()
-print(f"体检后：state={after['state']}  队列={after['qstate']}  "
-      f"楼层={after['posts']}  告警={after['warn'][:40]!r}")
-print()
+    r = integrity(tok)
+    after = state()
+    print(f"体检后：state={after['state']}  队列={after['qstate']}  "
+          f"楼层={after['posts']}  告警={after['warn'][:40]!r}")
+    print()
 
-growth = r.get("growth") or []
-warns = r.get("warnings") or []
-gap_items = [g for g in growth if int(g.get("tid") or 0) == TID]
-print(f"体检报告：检查 {r.get('checked')} 帖 · 硬问题 {len(r.get('problems') or [])} · "
-      f"软警告 {len(warns)} · 增量 {len(growth)} · 站方限制 {len(r.get('restricted') or [])}")
-print()
+    growth = r.get("growth") or []
+    warns = r.get("warnings") or []
+    gap_items = [g for g in growth if int(g.get("tid") or 0) == TID]
+    print(f"体检报告：检查 {r.get('checked')} 帖 · 硬问题 {len(r.get('problems') or [])} · "
+          f"软警告 {len(warns)} · 增量 {len(growth)} · 站方限制 {len(r.get('restricted') or [])}")
+    print()
 
-print("① 少贴的帖进了**增量栏**")
-check("增量栏里有这个帖", len(gap_items) == 1, f"{len(gap_items)} 条")
-if gap_items:
-    print(f"   {gap_items[0].get('reason')}")
-soft_gap = [w for w in warns if int(w.get("tid") or 0) == TID]
-check("软警告栏里**没有**它（已挪到增量栏）", not soft_gap)
+    print("① 少贴的帖进了**增量栏**")
+    check("增量栏里有这个帖", len(gap_items) == 1, f"{len(gap_items)} 条")
+    if gap_items:
+        print(f"   {gap_items[0].get('reason')}")
+    soft_gap = [w for w in warns if int(w.get("tid") or 0) == TID]
+    check("软警告栏里**没有**它（已挪到增量栏）", not soft_gap)
 
-print("\n② 标记 + 入队（解死锁）")
-check("★ detail_state 变成 'stale'", after["state"] == "stale", after["state"])
-check("★ detail_queue 是 pending（会被自动捡走重采）",
-      after["qstate"] == "pending", str(after["qstate"]))
-check("告警写明了少贴多少", "少贴" in after["warn"], after["warn"][:60])
+    print("\n② 标记 + 入队（解死锁）")
+    check("★ detail_state 变成 'stale'", after["state"] == "stale", after["state"])
+    check("★ detail_queue 是 pending（会被自动捡走重采）",
+          after["qstate"] == "pending", str(after["qstate"]))
+    check("告警写明了少贴多少", "少贴" in after["warn"], after["warn"][:60])
 
-print("\n③ ★ 原帖保留（一条都不删）")
-check("★ 楼层数没变（3 层）", after["posts"] == before["posts"] == 3,
-      f"{before['posts']} → {after['posts']}")
-check("★ 标题还在", True)
+    print("\n③ ★ 原帖保留（一条都不删）")
+    check("★ 楼层数没变（3 层）", after["posts"] == before["posts"] == 3,
+          f"{before['posts']} → {after['posts']}")
+    check("★ 标题还在", True)
 
-print("\n④ 幂等：再体检一次不重复标记")
-r2 = integrity(tok)
-after2 = state()
-gap2 = [g for g in (r2.get("growth") or []) if int(g.get("tid") or 0) == TID]
-# ★ 它**仍会**出现在增量栏（它确实待补采，这是对的）——
-#   但不该再走「标记 + 补采计数 +1」这条路。
-check("第二次体检：它仍在增量栏（确实待补采）", len(gap2) == 1, f"{len(gap2)} 条")
-check("第二次体检：不再是「刚标记的少贴」",
-      not any(g.get("gap_retry") for g in gap2),
-      str([g.get("reason") for g in gap2])[:80])
-check("★ 补采次数**没有**被重复累加（仍是 1 次）",
-      "已补采 1 次" in after2["warn"], after2["warn"][:60])
-check("状态仍是 stale（没变）", after2["state"] == "stale", after2["state"])
-check("楼层仍然一条不少", after2["posts"] == 3, str(after2["posts"]))
+    print("\n④ 幂等：再体检一次不重复标记")
+    r2 = integrity(tok)
+    after2 = state()
+    gap2 = [g for g in (r2.get("growth") or []) if int(g.get("tid") or 0) == TID]
+    # ★ 它**仍会**出现在增量栏（它确实待补采，这是对的）——
+    #   但不该再走「标记 + 补采计数 +1」这条路。
+    check("第二次体检：它仍在增量栏（确实待补采）", len(gap2) == 1, f"{len(gap2)} 条")
+    check("第二次体检：不再是「刚标记的少贴」",
+          not any(g.get("gap_retry") for g in gap2),
+          str([g.get("reason") for g in gap2])[:80])
+    check("★ 补采次数**没有**被重复累加（仍是 1 次）",
+          "已补采 1 次" in after2["warn"], after2["warn"][:60])
+    check("状态仍是 stale（没变）", after2["state"] == "stale", after2["state"])
+    check("楼层仍然一条不少", after2["posts"] == 3, str(after2["posts"]))
+finally:
+    # ★ 收尾：从生产库里把测试帖删干净（不留占队首的孤儿行）
+    cleanup_thread()
+    _left = sqlite3.connect(DB).execute(
+        "SELECT COUNT(*) FROM threads WHERE tid=?", (TID,)).fetchone()[0]
+    check("★ 测试帖已从生产库清干净（不留占队首的行）", _left == 0, f"剩 {_left} 条")
 
 print()
 print("=" * 72)

@@ -45,7 +45,8 @@ python _tools\test_increment.py
 | `md2docx.py` | Markdown → Word（自包含，只依赖 python-docx） |
 | `rebuild_report_docx.py` | 重建两份报告的 docx（**改完 md 必须跑**；WPS 占用时加 `wait 120`） |
 | `verify_report_docx.py` | 交付前**回读验收** docx（不看源码，只看产物） |
-| `clean_test_residue.py` | 清测试残留数据 |
+| `clean_test_residue.py` | 清测试残留数据（tid ≥ 9 号段；**默认 dry-run**，加 `--apply` 才删） |
+| `clean_queue_orphans.py` | 清队列孤儿活（threads 已终态、队列还 pending）；**默认 dry-run**，`--apply` 才写库 |
 | `recycle_bin.py` | 把临时文件送**系统回收站**（本机删除纪律：只走可恢复通道） |
 | `sync_member_bundle.py` | 走**同一个** `/api/agent/bundle.zip` 端点同步成员端包 |
 | `set_member_pw.py` / `reset_member_pw.py` / `add_member.py` | 成员账号管理 |
