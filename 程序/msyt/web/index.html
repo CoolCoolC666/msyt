@@ -188,6 +188,16 @@
         <button class="ghost" id="btn-helper-port-default" title="设为服务器默认：以后新下载的启动包都用这个端口">设为服务器默认</button>
         <span class="hint" id="helper-port-msg"></span>
       </div>
+      <div class="row">
+        <label class="hint" for="detail-workers">采集并发数</label>
+        <input id="detail-workers" type="number" min="1" max="8" step="1" style="width:90px">
+        <button class="ghost" id="btn-workers-save">保存到本机</button>
+        <button class="ghost" id="btn-workers-default" title="设为服务器默认：以后各成员的 agent 都用这个并发数">设为服务器默认</button>
+        <span class="hint" id="workers-msg"></span>
+      </div>
+      <p class="hint" id="workers-tip">★ <b>推荐 3 路</b>：实测 1 路约 <b>6.2 万帖/天</b>，3 路约 <b>12.3 万帖/天</b>（零异常）；
+        <b>5 路起站方会限速，反而更慢</b>。站方按 IP 限流，各成员互不影响，
+        但同一台机器别同时跑多个采集进程。</p>
       <p class="hint">「启动本机 agent」需要你先双击启动包里的 <code>启动助手.cmd</code>：
         它会在本机开一个 127.0.0.1:<span class="hp">8766</span> 的小助手，网页才能呼叫它
         （浏览器出于安全不会让网页随便访问你电脑上的其它端口，所以要这个「双方都同意」的小助手）。<br>

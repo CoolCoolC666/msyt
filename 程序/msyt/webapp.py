@@ -372,7 +372,8 @@ def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
         #   workers=1 时 run_parallel 走串行分支，行为与改造前一致。
         from .parallel import run_parallel
 
-        _w = max(1, int(cfg.detail_workers or 1))
+        # ★ 并发度取**服务端设置**（管理员可在网页上改），不是写死的。
+        _w = _detail_workers()
         job.log(f"[detail] 并发采集启动：{_w} 路"
                 + ("（串行）" if _w == 1 else f"（每路独立限速 {cfg.interval}s）"))
 
@@ -395,7 +396,7 @@ def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
     res = dc.run(limit=p.get("limit") or 0,
                  max_attempts=p.get("max_attempts") or 3,
                  should_stop=job.should_stop,
-                 workers=cfg.detail_workers)
+                 workers=_detail_workers())
     return res
 
 
@@ -1748,7 +1749,6 @@ def api_agent_helper_port(request: Request) -> Dict[str, Any]:
     p = _helper_port()
     return {"port": p, "default": DEFAULT_HELPER_PORT}
 
-
 @app.post("/api/agent/helper-port")
 def api_agent_helper_port_set(request: Request,
                               port: int = Body(..., embed=True)) -> Dict[str, Any]:
@@ -1762,6 +1762,76 @@ def api_agent_helper_port_set(request: Request,
     return {"ok": True, "port": p,
             "message": f"新下载的启动包会改用端口 {p}；"
                        f"已经下载过包的成员需要**重新下载一次**才能对上。"}
+
+
+# ====================================================================== 采集并发数
+#: 详情采集的**并发线程数**（2026-10-25 加）
+#:
+#: ★ 为什么能调、推荐多少
+#:   实测（2026-10-25，真实请求对，逐级加压，每档之间歇 20 秒）：
+#:     1 路 0 异常 ≈ 61,700 帖/天    2 路 0 异常 ≈ 96,000 帖/天
+#:     3 路 0 异常 ≈ 123,000 帖/天   ← **推荐值**（产能翻倍且零异常）
+#:     5 路 出现 network 错误、吞吐反降（105,000）
+#:   → 3 是安全档；再往上站方会限速，**反而更慢**。
+#:   → 站方是**按 IP 限流**的：各成员在不同 IP 上，互不影响；
+#:     但**同一台机器**上跑多个采集进程会互相挤占。
+#:
+#: ★ 设置存在**服务端**（`程序/data/detail-workers.txt`），
+#:   成员也可以只改**自己那台机器**（在助手里设，网页上显示本机值）。
+DEFAULT_DETAIL_WORKERS = 3
+RECOMMENDED_DETAIL_WORKERS = 3
+DETAIL_WORKERS_FILE = (Path(__file__).resolve().parent.parent
+                       / "data" / "detail-workers.txt")
+DETAIL_WORKERS_MIN = 1
+DETAIL_WORKERS_MAX = 8
+
+
+def _detail_workers() -> int:
+    """当前生效的采集并发数（读服务端设置，坏了就用推荐值）。"""
+    try:
+        v = int(DETAIL_WORKERS_FILE.read_text(encoding="utf-8").strip())
+        if DETAIL_WORKERS_MIN <= v <= DETAIL_WORKERS_MAX:
+            return v
+    except Exception:                                 # noqa: BLE001
+        pass
+    return RECOMMENDED_DETAIL_WORKERS
+
+
+def _set_detail_workers(n: int) -> int:
+    """保存服务端默认的采集并发数。返回实际生效的值。"""
+    n = int(n)
+    if not (DETAIL_WORKERS_MIN <= n <= DETAIL_WORKERS_MAX):
+        raise HTTPException(
+            400, f"并发数要在 {DETAIL_WORKERS_MIN}~{DETAIL_WORKERS_MAX} 之间")
+    DETAIL_WORKERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DETAIL_WORKERS_FILE.write_text(str(n), encoding="utf-8")
+    return n
+
+
+@app.get("/api/agent/workers")
+def api_agent_workers(request: Request) -> Dict[str, Any]:
+    """采集并发数（**成员也能读** —— 助手起 agent 时要用它）。"""
+    _require_member(request)
+    w = _detail_workers()
+    return {"workers": w, "recommended": RECOMMENDED_DETAIL_WORKERS,
+            "min": DETAIL_WORKERS_MIN, "max": DETAIL_WORKERS_MAX,
+            "tip": "推荐 3 路：实测 1 路约 6.2 万帖/天，3 路约 12.3 万（零异常）；"
+                   "5 路起站方会限速，反而更慢。"}
+
+
+@app.post("/api/agent/workers")
+def api_agent_workers_set(request: Request,
+                          workers: int = Body(..., embed=True)) -> Dict[str, Any]:
+    """改**服务器默认**的采集并发数（**管理员专属**）。
+
+    ★ 改完不需要成员重下包 —— 助手每次起 agent 前都会来读一次这个值。
+    """
+    require_admin(request)
+    w = _set_detail_workers(workers)
+    return {"ok": True, "workers": w, "recommended": RECOMMENDED_DETAIL_WORKERS,
+            "message": (f"服务器默认并发数已改为 {w} 路。"
+                        + ("（正是推荐值）" if w == RECOMMENDED_DETAIL_WORKERS
+                           else f"（推荐 {RECOMMENDED_DETAIL_WORKERS} 路）"))}
 
 
 def _agent_api_base(request: Request) -> str:
@@ -1884,7 +1954,8 @@ def api_agent_bundle(request: Request) -> Response:
         primary, ticket, str(pkg_dir),
         helper_src=str(pkg_dir / "msyt-helper.py"),
         server_alt=alt,
-        helper_port=_helper_port())
+        helper_port=_helper_port(),
+        agent_workers=_detail_workers())
     return Response(
         content=data, media_type="application/zip",
         headers={"Content-Disposition":

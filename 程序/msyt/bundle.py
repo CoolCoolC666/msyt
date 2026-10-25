@@ -145,8 +145,13 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                  helper_src: str = "",
                  cf_id: str = "", cf_secret: str = "",
                  server_alt: str = "",
-                 helper_port: int = 8766) -> Tuple[bytes, str]:
+                 helper_port: int = 8766,
+                 agent_workers: int = 0) -> Tuple[bytes, str]:
     """生成启动包。返回 (zip 字节, 文件名)。
+
+    `agent_workers`：写进包里的**采集并发数**（0 = 用模块默认 AGENT_WORKERS）。
+    服务端改了默认并发数后，**新下载的包**会带上新值；
+    已经下载过的包不用重下 —— 助手每次起 agent 前都会去读服务端默认值。
 
     `server`：**主用**控制面地址（由调用方从请求里推导 ——
         即「下载者此刻访问的地址」）
@@ -163,6 +168,10 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
           不带 service token 会被 Access 挡下（返回登录页 HTML）。
           放在包内的 `cf-access.txt`（**不进命令行** —— 命令行在进程列表里是公开的）。
     """
+    # ★ 本包里的采集并发数（0 = 用模块默认值 AGENT_WORKERS）
+    _aw = int(agent_workers or AGENT_WORKERS)
+    if _aw < 1:
+        _aw = AGENT_WORKERS
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         # ---- 1. msyt 包源码 ----
@@ -214,7 +223,7 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
              if server_alt else []) + [
             "python -m msyt agent --server " + server
             + ((" --server-alt " + server_alt) if server_alt else "")
-            + " --workers " + str(AGENT_WORKERS),
+            + " --workers " + str(_aw),
             "echo.",
             "echo agent stopped.",
             "pause",
@@ -259,6 +268,16 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                    "# 「启动助手.cmd」。\n"
                    "# ⚠ 只改本机端口的话，网页那边的端口也要改成一样，否则网页叫不到它。\n"
                    "#   最省事的办法：回网页把端口改成这个数，或重新下载一次启动包。\n")
+        # ★ 本机的**采集并发数**（2026-10-25 加）
+        #   成员改这个文件就能改自己机器的并发度（各人网速不同）。
+        #   优先级：本文件 > 服务器默认 > 推荐值 3。
+        z.writestr("workers.txt",
+                   f"{int(_aw)}\n"
+                   "# 你这台机器的「采集并发数」（同时开几个线程去站方抓帖子）。\n"
+                   "# ★ 推荐 3：实测 1 路约 6.2 万帖/天，3 路约 12.3 万（零异常）；\n"
+                   "#   5 路起站方会限速，反而更慢。\n"
+                   "# 想改：把上面这个数字改成 1~8 → 保存 → 下次点「开始采集」时生效。\n"
+                   "# 也可以回网页的「成员端工具」里改（那儿还能提示推荐值）。\n")
 
         # ---- 2b. 自检.cmd：双击就能诊断「到底哪一环不通」 ----
         #   ★ 为什么必须有（2026-10-23 晚上组员实测）：
@@ -335,3 +354,4 @@ def build_helper(server: str, ticket: str, helper_src: str) -> bytes:
         src = f.read()
     src = src.replace("__MSYT_SERVER__", server).replace("__MSYT_TICKET__", ticket)
     return src.encode("utf-8")
+

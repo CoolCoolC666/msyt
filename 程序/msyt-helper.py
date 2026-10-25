@@ -72,6 +72,10 @@ PORT = 8766
 #:     3 路 0 异常 ≈ 123,000（最优点）· 5 路出现连接错误、吞吐反降
 #:   每台成员机器在**不同的 IP** 上跑 → 互不影响。
 #:   嫌快就改成 1（退回串行）。
+#:
+#: ★ 注意：起 agent 时用的是 `_effective_workers()`
+#:   （**本机 workers.txt > 服务端默认 > 这个值**），
+#:   所以这里的 3 只是「兜底默认值」；成员在网页上改了就以那个为准。
 HELPER_WORKERS = 3
 
 STATE = {
@@ -139,6 +143,78 @@ def _api(server: str, path: str, payload: dict, timeout: float = 20.0) -> dict:
         return json.loads(raw)
     except json.JSONDecodeError:
         raise RuntimeError("控制面返回的不是 JSON（可能被网关/登录页拦了）") from None
+
+
+def _api_get(server: str, path: str, token: str,
+             timeout: float = 20.0) -> dict:
+    """向控制面发一个 **GET**（带令牌）。
+
+    ★ 为什么要单独一个：`_api` 是 POST 且**不带 Authorization**，
+      而 `/api/agent/workers` 这类接口要认令牌（成员可读）→ 用不了它。
+    """
+    url = server.rstrip("/") + path
+    req = urllib.request.Request(url, method="GET", headers={
+        "User-Agent": UA, "Authorization": "Bearer " + (token or "")})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+    except Exception as e:                           # noqa: BLE001
+        raise RuntimeError(f"读控制面失败：{e}") from None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError("控制面返回的不是 JSON") from None
+
+
+#: 采集并发数的推荐值与上下限（与 server 端一致）
+WORKERS_MIN = 1
+WORKERS_MAX = 8
+RECOMMENDED_WORKERS = 3
+
+
+def _workers_file() -> str:
+    """本机并发度设置文件（包根目录 workers.txt，和 helper-port.txt 一个套路）。"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "workers.txt")
+
+
+def _local_workers() -> int:
+    """本机设置的采集并发数；**0 = 没设**（走服务端默认）。"""
+    try:
+        with open(_workers_file(), encoding="utf-8") as f:
+            v = int(f.read().strip())
+        if WORKERS_MIN <= v <= WORKERS_MAX:
+            return v
+    except Exception:                                 # noqa: BLE001
+        pass
+    return 0
+
+
+def _set_local_workers(n: int) -> int:
+    """把本机的采集并发数写进 workers.txt。返回实际写入的值。"""
+    n = int(n)
+    if not (WORKERS_MIN <= n <= WORKERS_MAX):
+        raise ValueError(f"并发数要在 {WORKERS_MIN}~{WORKERS_MAX} 之间")
+    p = _workers_file()
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(str(n))
+    return n
+
+
+def _server_workers(token: str) -> int:
+    """服务端的默认并发数（读不到就退回推荐值）。"""
+    if not token:
+        return RECOMMENDED_WORKERS
+    try:
+        r = _api_get(STATE["server"], "/api/agent/workers", token)
+        v = int(r.get("workers") or RECOMMENDED_WORKERS)
+        return v if WORKERS_MIN <= v <= WORKERS_MAX else RECOMMENDED_WORKERS
+    except Exception:                                 # noqa: BLE001
+        return RECOMMENDED_WORKERS
+
+
+def _effective_workers(token: str) -> int:
+    """实际生效的并发数：**本机设置** > 服务端默认 > 推荐值。"""
+    return _local_workers() or _server_workers(token)
 
 
 def _auto_update(token: str) -> bool:
@@ -321,8 +397,37 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.start(body))
         elif self.path.startswith("/stop"):
             self._json(self.stop())
+        elif self.path.startswith("/workers"):
+            self.set_workers(body)
         else:
             self._json({"ok": False, "error": "not found"}, 404)
+
+    def set_workers(self, body=None):
+        """设置**本机**的采集并发数（网页点「保存到本机」时调这个）。
+
+        ★ 为什么助手也要存一份
+          各成员家的网速/带宽不一样 → 并发度该能**各机各设**。
+          优先级：**本机 workers.txt** > 服务端默认 > 推荐值 3。
+        """
+        try:
+            n = int((body or {}).get("workers"))
+        except Exception:                                 # noqa: BLE001
+            self._json({"ok": False,
+                        "error": f"并发数要在 {WORKERS_MIN}~{WORKERS_MAX} 之间"}, 400)
+            return
+        try:
+            v = _set_local_workers(n)
+        except Exception as e:                           # noqa: BLE001
+            self._json({"ok": False, "error": str(e)}, 400)
+            return
+        log(f"本机采集并发数已改为 {v} 路"
+            + ("" if v == RECOMMENDED_WORKERS else f"（推荐 {RECOMMENDED_WORKERS} 路）"))
+        self._json({"ok": True, "workers": v,
+                    "recommended": RECOMMENDED_WORKERS,
+                    "message": f"本机采集并发数已设为 {v} 路"
+                               + ("" if v == RECOMMENDED_WORKERS
+                                  else f"；推荐 {RECOMMENDED_WORKERS} 路。"
+                                       "下次点「开始采集」时生效。")})
 
     # ---------------------------------------------------------- 动作
     def status(self):
@@ -335,6 +440,11 @@ class Handler(BaseHTTPRequestHandler):
                     # ★ 报出自己的端口：网页拿它跟「网页设的端口」比对，
                     #   对不上就提醒「你改了端口 → 重新下载启动包」。
                     "port": STATE.get("port") or 0,
+                    # ★ 本机的采集并发数（网页要显示它，并让用户能改）
+                    "workers": _local_workers() or 0,
+                    "workers_recommended": RECOMMENDED_WORKERS,
+                    "workers_min": WORKERS_MIN,
+                    "workers_max": WORKERS_MAX,
                     "server_alt": STATE.get("server_alt") or "",
                     "ticket_mode": bool(STATE.get("ticket")),
                     "has_jwt": bool(STATE.get("jwt")),
@@ -413,10 +523,13 @@ class Handler(BaseHTTPRequestHandler):
                 _auto_update(tok)
         if tok:
             cmd += ["--token", tok]
-            # ★ 并发采集（2026-10-25）：3 路是实测安全档
-            #   （1 路 ≈6.2 万帖/天，3 路 ≈12.3 万，5 路会出连接错误）。
-            #   每台成员机器在**不同的 IP** 上跑，互不影响。
-            cmd += ["--workers", str(HELPER_WORKERS)]
+            # ★ 并发采集（2026-10-25）：**本机设置** > 服务端默认 > 推荐 3 路。
+            #   实测 1 路 ≈6.2 万帖/天，3 路 ≈12.3 万（零异常），
+            #   5 路起站方会限速、反而更慢 → 推荐 3。
+            _w = _effective_workers(tok)
+            cmd += ["--workers", str(_w)]
+            log(f"本机采集并发数：{_w} 路"
+                + ("（本机自设）" if _local_workers() else "（服务端默认）"))
             with LOCK:
                 STATE["cred_src"] = src
             # （自动更新已在方法开头做过 —— 那里才能覆盖到「agent 还在跑」的情况）

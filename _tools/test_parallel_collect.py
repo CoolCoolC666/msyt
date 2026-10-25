@@ -102,7 +102,8 @@ check("detail 有 for_thread（每线程独立 client/连接）",
       "def for_thread" in detail_src)
 check("detail 并发路径用 run 的独立 client",
       "self.for_thread()" in detail_src)
-check("webapp 把 workers 传给 dc.run", "workers=cfg.detail_workers" in webapp_src)
+check("webapp 把 workers 传给 dc.run（取**服务端设置**，可网页改）",
+      "workers=_detail_workers()" in webapp_src)
 check("agent 有 workers 参数", "workers: int = 1" in agent_src)
 check("agent 有 _process_pick（串行/并发共用）",
       "def _process_pick" in agent_src)

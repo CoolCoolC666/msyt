@@ -2036,6 +2036,96 @@ $('#btn-helper-start').onclick = async () => {
 };
 
 /* ---- 小助手端口：保存到本机 / 设为服务器默认 ---- */
+/* ★ 采集并发数（2026-10-25 加）
+   三处要知道同一个值：
+     ① 成员**本机**的 agent（助手起 agent 时用；各人网速不同，可各设各的）
+     ② **服务器默认**（管理员设；没自设的人用这个值）
+     ③ 网页上显示 / 设置
+   优先级：本机 > 服务器默认 > 推荐值 3。
+   ★ 推荐 3：实测 1 路 ≈6.2 万帖/天，3 路 ≈12.3 万（零异常），
+     5 路起站方会限速、反而更慢。 */
+const WORKERS_KEY = 'msyt.detailWorkers';
+const DEFAULT_WORKERS = 3;
+let DETAIL_WORKERS = DEFAULT_WORKERS;
+let WORKERS_SERVER = DEFAULT_WORKERS;
+
+function paintDetailWorkers() {
+  const ip = $('#detail-workers');
+  if (ip && document.activeElement !== ip) ip.value = DETAIL_WORKERS;
+}
+
+async function loadDetailWorkers() {
+  // ① 本机助手自报（助手没起就跳过）
+  try {
+    const s = await fetch(helperUrl() + '/status').then(r => r.json());
+    if (s && s.workers) {
+      DETAIL_WORKERS = s.workers;
+      try { localStorage.setItem(WORKERS_KEY, String(s.workers)); } catch (_) { }
+    }
+  } catch (_) { /* 本机助手没跑 */ }
+  // ② 服务器默认（管理员设的）
+  try {
+    const r = await api('/api/agent/workers');
+    if (r && r.workers) {
+      WORKERS_SERVER = r.workers;
+      if (!DETAIL_WORKERS) DETAIL_WORKERS = r.workers;
+      const tip = $('#workers-tip');
+      if (tip && r.tip) {
+        // 注意：txt 会被 esc() 转义 → 强调用 ‹› 包起来（会被换成 <b>）
+        tip.innerHTML = '★ ' + esc(r.tip).replace(/‹([^›]*)›/g, '<b>$1</b>');
+      }
+    }
+  } catch (_) { /* 读不到就用默认值 */ }
+  paintDetailWorkers();
+}
+
+/* ---- 采集并发数：保存到本机 / 设为服务器默认 ---- */
+$('#btn-workers-save').onclick = async () => {
+  const v = parseInt($('#detail-workers').value, 10);
+  const msg = $('#workers-msg');
+  if (!(v >= 1 && v <= 8)) {
+    msg.innerHTML = '<span style="color:#b42318">并发数要在 1~8 之间</span>';
+    return;
+  }
+  try {
+    const r = await fetch(helperUrl() + '/workers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workers: v }),
+    }).then(x => x.json());
+    if (!r || !r.ok) throw new Error((r && r.error) || '助手没回应');
+    DETAIL_WORKERS = v;
+    try { localStorage.setItem(WORKERS_KEY, String(v)); } catch (_) { }
+    paintDetailWorkers();
+    msg.innerHTML = '<b>本机并发数已设为 ' + v + ' 路</b>，下次点「开始采集」时生效。'
+      + (v === 3 ? '' : ' ★ 推荐 <b>3</b> 路。');
+  } catch (e) {
+    msg.innerHTML = '<span style="color:#b42318">设不了：' + esc(e.message)
+      + ' —— 本机助手没在跑？先双击包里的「启动助手.cmd」</span>';
+  }
+};
+
+$('#btn-workers-default').onclick = async () => {
+  const v = parseInt($('#detail-workers').value, 10);
+  const msg = $('#workers-msg');
+  if (!(v >= 1 && v <= 8)) {
+    msg.innerHTML = '<span style="color:#b42318">并发数要在 1~8 之间</span>';
+    return;
+  }
+  try {
+    const r = await api('/api/agent/workers', {
+      method: 'POST', body: JSON.stringify({ workers: v }),
+    });
+    WORKERS_SERVER = r.workers;
+    msg.innerHTML = '<b>服务器默认并发数已改为 ' + r.workers + ' 路</b>。'
+      + ' ★ 成员下次点「开始采集」时自动生效（不用重下包）。';
+    toast('服务器默认并发数已更新');
+  } catch (e) {
+    msg.innerHTML = '<span style="color:#b42318">改不了：' + esc(e.message)
+      + '（只有管理员能改服务器默认）</span>';
+  }
+};
+
 $('#btn-helper-port-save').onclick = () => {
   const v = parseInt($('#helper-port').value, 10);
   const msg = $('#helper-port-msg');
@@ -2593,6 +2683,7 @@ window.addEventListener('unhandledrejection', ev => {
 loadHealth();
 if (state.token) { loadMeta().catch(() => {}); }
 loadHelperPort();
+loadDetailWorkers();
 probeServerCaps();
 ensurePickers();
 $('#stream-log').dataset.empty = '1';
