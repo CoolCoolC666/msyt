@@ -177,7 +177,7 @@ def _fresh_tmpdb():
     return tdb
 
 
-def _collect(workers):
+def _collect(workers, attempt=1):
     tdb = _fresh_tmpdb()
     dc = DetailCollector(tdb, Client(cfg, verbose=False), cfg)
     t0 = time.time()
@@ -195,14 +195,30 @@ def _collect(workers):
         got[t] = (n, st, qst)
     c.close()
     tdb.conn.close()
-    print(f"    workers={workers}: {r} 用时 {el:.0f}s（{el/max(1,len(picks)):.1f}s/帖）")
+    print(f"    workers={workers} 第{attempt}次: {r} 用时 {el:.0f}s"
+          f"（{el/max(1,len(picks)):.1f}s/帖）")
     for t in picks:
         print(f"       tid={t}: {got[t][0]} 楼  状态={got[t][1]}  队列={got[t][2]}")
     return got, r, el
 
 
-ser, r1, el1 = _collect(1)
-par, r3, el3 = _collect(3)
+def _collect_retry(workers, tries=2):
+    """★ 整轮重试：站方会**间歇性**返回「提示信息」页（密集访问时出现）。
+    那种帖这轮会采到 0 层（判为临时故障、不是受限）→ 断言会飘。
+    → 整轮重试一次；两轮都拿不到才算真问题。"""
+    got = r = el = None
+    for i in range(1, tries + 1):
+        got, r, el = _collect(workers, i)
+        if all(v[0] > 0 for v in got.values()):
+            return got, r, el
+        if i < tries:
+            print("       （有帖这轮没采到 —— 疑似站方瞬时提示页，整轮重试）")
+            time.sleep(3)
+    return got, r, el
+
+
+ser, r1, el1 = _collect_retry(1)
+par, r3, el3 = _collect_retry(3)
 
 check("两种并发度采到的楼数完全一致",
       {k: v[0] for k, v in ser.items()} == {k: v[0] for k, v in par.items()},

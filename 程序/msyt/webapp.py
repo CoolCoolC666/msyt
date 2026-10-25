@@ -372,12 +372,16 @@ def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
         #   workers=1 时 run_parallel 走串行分支，行为与改造前一致。
         from .parallel import run_parallel
 
+        _w = max(1, int(cfg.detail_workers or 1))
+        job.log(f"[detail] 并发采集启动：{_w} 路"
+                + ("（串行）" if _w == 1 else f"（每路独立限速 {cfg.interval}s）"))
+
         def _one(tid: int) -> Dict[str, Any]:
             c = dc.for_thread()
             return c.collect_one(tid, should_stop=job.should_stop)
 
         results, errors = run_parallel(tids, _one,
-                                       workers=cfg.detail_workers,
+                                       workers=_w,
                                        should_stop=job.should_stop)
         out = [r for r in results if isinstance(r, dict)]
         for tid, e in errors:
