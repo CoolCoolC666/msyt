@@ -149,15 +149,33 @@ def main() -> int:
     check("④ 不同 IP 各自计数（限速按真实客户端 IP，不是 127.0.0.1）",
           st == 401, f"status={st}")
 
-    # 同一 IP 连撞 → 应触发 429
+    # 同一 IP、**不同邮箱**连撞 → 应触发 IP 总闸（防撞库）
     last = 0
-    for _ in range(12):
+    for i in range(26):
         last, _ = req("/api/auth/login",
-                      body={"email": "no-such-member@example.com", "password": "x"},
+                      body={"email": f"probe{i}@example.com", "password": "x"},
                       headers={"CF-Connecting-IP": "203.0.113.99"})
         if last == 429:
             break
-    check("④ 同一 IP 连续失败 → 触发限速 429", last == 429, f"status={last}")
+    check("④ 同一 IP 连撞不同邮箱 → 触发限速 429（防撞库）",
+          last == 429, f"status={last}")
+
+    # 同一 IP、**同一邮箱**连撞 → 应触发「IP+邮箱」闸（防针对单个成员）
+    last = 0
+    for _ in range(8):
+        last, _ = req("/api/auth/login",
+                      body={"email": "one-target@example.com", "password": "x"},
+                      headers={"CF-Connecting-IP": "203.0.113.77"})
+        if last == 429:
+            break
+    check("④ 同一邮箱连撞 → 触发账号级限速 429", last == 429, f"status={last}")
+
+    # 本机豁免：管理员自己的机器不该被自己人的手滑锁住
+    st, _ = req("/api/auth/login",
+                body={"email": "no-such-member@example.com", "password": "x"},
+                host="127.0.0.1:8765")
+    check("④ 本机登录失败**不计入**公网限速（本机豁免）",
+          st == 401, f"status={st}")
 
     # ---------------------------------------------------------- ⑤ 口令门（可选）
     key_file = os.path.join(PROG, "data", "gate-key.txt")
@@ -181,6 +199,15 @@ def main() -> int:
         check("⑤ 口令校验接口认口令", st == 200 and '"ok"' in body, f"{st}")
         st, _ = req("/api/auth/gate", body={"key": "wrong"})
         check("⑤ 口令校验接口拒错口令", st == 401, f"status={st}")
+        # 口令校验接口在白名单里（外人得先能打开口令页）→ 必须自己限速
+        last = 0
+        for _ in range(14):
+            last, _ = req("/api/auth/gate", body={"key": "guess"},
+                          headers={"CF-Connecting-IP": "203.0.113.88"})
+            if last == 429:
+                break
+        check("⑤ 口令接口**自己有限速**（不能无限次猜口令）",
+              last == 429, f"status={last}")
 
     print("\n" + "=" * 78)
     npass = sum(1 for _, ok, _ in results if ok)

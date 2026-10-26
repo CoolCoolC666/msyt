@@ -118,11 +118,20 @@ def main() -> int:
     except Exception as e:                                   # noqa: BLE001
         print("  | 成员登录失败：", e)
     check("★ 拿到成员令牌（用成员身份测管理面）", bool(mtok))
+    # ★ 管理端点**不在**口令白名单里 → 要带访问口令（模拟「已过口令门的成员」）。
+    #   口令门是「整站门」，挡在**角色鉴权之前**：先过站门，再看权限。
+    gate_hdr = {}
+    try:
+        kf = os.path.join(ROOT, "程序", "data", "gate-key.txt")
+        if os.path.isfile(kf):
+            gate_hdr["Cookie"] = "msyt_gate=" + open(kf, encoding="utf-8").read().strip()
+    except OSError:
+        pass
     try:
         r = urllib.request.urlopen(urllib.request.Request(
             API + "/api/members",
             headers={"User-Agent": "msyt-agent/1.1",
-                     "Authorization": "Bearer " + mtok}), timeout=30)
+                     "Authorization": "Bearer " + mtok, **gate_hdr}), timeout=30)
         check("非管理员调管理接口被拒（应 403）", False, f"竟然 {r.status}")
     except urllib.error.HTTPError as e:
         check("非管理员调管理接口被拒（应 403）", e.code == 403, f"HTTP {e.code}")
@@ -144,12 +153,16 @@ def main() -> int:
                        if "server-alt.txt" in names else "")
             has_cf = "cf-access.txt" in names
             z.extractall(tmpdir)
-        # ★ 包现在带**主用 + 备用**两个地址（2026-10-23 改成
-        #   「本地浏览器 + 服务器」协同生成），所以断言改成
-        #   「两个地址里**必须有** agentapi 子域名」——
-        #   它是 agent 唯一能直连的（Access 对它 bypass）。
-        check("★ 包里带 agent 专用 API 地址（主用或备用都行）",
-              API in (server_txt, alt_txt), f"主用={server_txt} 备用={alt_txt}")
+        # ★ 包里必须带**agent 能直连的公网地址**。
+        #   2026-10-26 起公网入口是 **quick tunnel**（`*.trycloudflare.com`）——
+        #   旧的 `agentapi.…` 命名隧道域名在境内已被按 SNI 封锁、连不上，
+        #   所以这里不再要求「必须是 agentapi 子域名」，
+        #   改成「主用或备用里有**当前这个公网入口**」。
+        #   ★ 注意用**子串**判断（`API in alt_txt`）：备用地址现在是**多行**
+        #   （地址池），`API in (a, b)` 是 tuple 成员判断，多行时必然失配。
+        check("★ 包里带 agent 可直连的公网地址（主用或备用都行）",
+              (API in server_txt) or (API in alt_txt),
+              f"主用={server_txt} 备用={alt_txt}")
         check("包里不再带 service token（不需要了）", not has_cf,
               "" if not has_cf else "★ 仍带着多余的密钥")
 

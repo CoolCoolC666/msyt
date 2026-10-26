@@ -110,7 +110,8 @@ print(f"   备用 = {p1['alt'] or '(无)'}")
 check("★ 本地下载 → 主用是**本地地址**",
       p1["server"] == "http://127.0.0.1:8765", p1["server"])
 check("★ 本地下载 → 备用是当前部署的公网入口",
-      p1["alt"] == API_BASE, p1["alt"])
+      (p1["alt"] or "").strip() == API_BASE
+      or API_BASE in (p1["alt"] or ""), p1["alt"])
 check("包里有 server-alt.txt", p1["has_alt_file"])
 check("启动采集.cmd 传了 --server-alt", "--server-alt" in p1["cmd"])
 check("启动助手.cmd 传了 --server-alt", "--server-alt" in p1["helper_cmd"])

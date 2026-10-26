@@ -940,24 +940,11 @@ def api_agent_login(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
       于是把 agent 真正要用的接口**集中到 `/api/agent/*` 一个前缀下**，
       Access 只需要为这一个前缀放行（bypass），其余路径照旧受 Access 保护。
     """
-    ip = _client_ip(request)
-    if not _login_rate_ok(ip):
-        raise HTTPException(429, "登录失败次数过多，请 5 分钟后再试")
     body = dict(req)
     body["email"] = str(body.get("email") or "").strip().lower()
     body["password"] = str(body.get("password") or "")
-    try:
-        # ⚠⚠ **不要解包 dict**：Python 里 `a, b = {"token": x, "member": y}`
-        #   得到的是**两个 key**（'token' 和 'member'），不是 value！
-        #   于是 `return d` 返回字符串 'member' → 响应校验失败 → 500。
-        #   （这个坑踩过一次：agent 登录一律 500，栈里只说 "Input should be a
-        #    valid dictionary, input: 'member'"，不看返回结构根本猜不到。）
-        res = _login_core(body)
-    except HTTPException:
-        _login_fail(ip)
-        raise
-    _login_ok(ip)
-    return res
+    # 限速逻辑与网页登录**共用同一套**（本机豁免 + 双闸）—— 别两处各写一份。
+    return _login_with_rate(request, body)
 
 
 @app.get("/api/agent/me")
@@ -1028,9 +1015,19 @@ def api_agent_return(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
 
 
 #: 登录失败限流（按 IP，内存计数）。公网上开着登录口就必须有这道闸。
+#: ★ 阈值为什么放大到 20 次 / 10 分钟：
+#:   管理员与组员**同校园网** → 出口 IP 相同 → 一个人输错密码多了，
+#:   阈值太小会**把全组一起锁**（自己人反被 DoS）。
+#:   只统计**密码错误**，正常成员不会触发。
 _LOGIN_FAIL: Dict[str, List[float]] = {}
-_LOGIN_FAIL_MAX = 10          # 5 分钟内失败 10 次就锁
-_LOGIN_FAIL_WINDOW = 300.0
+_LOGIN_FAIL_MAX = 20         # 10 分钟内失败 20 次就锁
+_LOGIN_FAIL_WINDOW = 600.0
+
+#: 第二个闸：按「IP + 邮箱」—— 防**针对某个成员**被专门撞
+#:   （共享出口 IP 的场景下，这道闸比 IP 总闸更准）。
+_ACCT_FAIL: Dict[str, List[float]] = {}
+_ACCT_FAIL_MAX = 5           # 10 分钟内同一 (IP,邮箱) 失败 5 次就锁
+_ACCT_FAIL_WINDOW = 600.0
 
 
 def _login_rate_ok(ip: str) -> bool:
@@ -1049,6 +1046,24 @@ def _login_fail(ip: str) -> None:
 
 def _login_ok(ip: str) -> None:
     _LOGIN_FAIL.pop(ip, None)
+
+
+def _acct_rate_ok(acct: str) -> bool:
+    now = time.time()
+    hits = [t for t in _ACCT_FAIL.get(acct, []) if now - t < _ACCT_FAIL_WINDOW]
+    _ACCT_FAIL[acct] = hits
+    return len(hits) < _ACCT_FAIL_MAX
+
+
+def _acct_fail(acct: str) -> None:
+    now = time.time()
+    hits = [t for t in _ACCT_FAIL.get(acct, []) if now - t < _ACCT_FAIL_WINDOW]
+    hits.append(now)
+    _ACCT_FAIL[acct] = hits
+
+
+def _acct_ok(acct: str) -> None:
+    _ACCT_FAIL.pop(acct, None)
 
 
 #: 注册限流（按 IP，内存计数）。公网上的陌生人能无限注册 pending 账号，
@@ -1421,16 +1436,35 @@ def api_login(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
 
 
 def _login_with_rate(request: Request, req: dict) -> Dict[str, Any]:
+    """登录 + 失败限速（两道闸）。
+
+    ★ **本机豁免**：`127.0.0.1` / `localhost` 直接放行。
+      限速是为了防**公网撞库**；管理员本机（和本机上的测试/工具）
+      不该被自己人的一次手滑锁住。
+    ★ 两道闸：① 按 IP（防撞库）② 按「IP + 邮箱」（防针对单个成员）。
+      阈值放大到 20 次 / 10 分钟，是因为**管理员与组员同校园网**、
+      出口 IP 相同 —— 阈值太小会把自己人一起锁。
+    """
+    local = _is_local_request(request)
     ip = _client_ip(request)
-    if not _login_rate_ok(ip):
-        raise HTTPException(429, "登录失败次数过多，请 5 分钟后再试")
+    email = str(req.get("email") or "").strip().lower()
+    acct = ip + "|" + email
+    if not local:
+        if not _login_rate_ok(ip):
+            raise HTTPException(429, "登录失败次数过多，请 10 分钟后再试")
+        if not _acct_rate_ok(acct):
+            raise HTTPException(429, "该账号登录失败次数过多，请 10 分钟后再试")
     try:
         res = _login_core(req)
     except HTTPException:
-        _login_fail(ip)
+        if not local:
+            _login_fail(ip)
+            _acct_fail(acct)
         time.sleep(0.25)          # 慢一点，别让密码被高速枚举
         raise
-    _login_ok(ip)
+    if not local:
+        _login_ok(ip)
+        _acct_ok(acct)
     return res
 
 
@@ -2425,15 +2459,52 @@ def gate_page() -> Response:
     return Response(content=GATE_HTML, media_type="text/html; charset=utf-8")
 
 
+#: 口令门**自己的**失败限流（按 IP）。
+#: ★ 为什么必须单独有：口令校验接口 `/api/auth/gate` 在**白名单里**（否则
+#:   外人根本进不到口令页）→ 它是**公开可打**的 → 不限速就等于
+#:   摆了一个「无限次猜口令」的靶子。
+_GATE_FAIL: Dict[str, List[float]] = {}
+_GATE_MAX = 10             # 5 分钟内错 10 次就锁
+_GATE_WINDOW = 300.0
+
+
+def _gate_rate_ok(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _GATE_FAIL.get(ip, []) if now - t < _GATE_WINDOW]
+    _GATE_FAIL[ip] = hits
+    return len(hits) < _GATE_MAX
+
+
+def _gate_fail(ip: str) -> None:
+    now = time.time()
+    hits = [t for t in _GATE_FAIL.get(ip, []) if now - t < _GATE_WINDOW]
+    hits.append(now)
+    _GATE_FAIL[ip] = hits
+
+
 @app.post("/api/auth/gate")
 def api_gate(request: Request, req: dict = Body(...)) -> Response:
-    """校验访问口令 → 下发 Cookie（7 天）。"""
+    """校验访问口令 → 下发 Cookie（7 天）。
+
+    ★ 这个接口在口令门的**白名单**里（外人得先能打开口令页），
+      所以它是**公开可打**的 → 必须**自己有限速**，
+      否则等于挂了一个「无限次猜口令」的靶子。
+    """
     key = _gate_key()
     if not key:
         return JSONResponse({"ok": True, "next": "/"})
+    local = _is_local_request(request)      # ★ 本机豁免（本机调试/测试不计数）
+    ip = _client_ip(request)
+    if not local:
+        if not _gate_rate_ok(ip):
+            raise HTTPException(429, "口令错误次数过多，请 5 分钟后再试")
     if str(req.get("key") or "").strip() != key:
+        if not local:
+            _gate_fail(ip)
         time.sleep(0.3)              # 慢一点，别让口令被高速枚举
         raise HTTPException(401, "口令不对")
+    if not local:
+        _GATE_FAIL.pop(ip, None)
     nxt = str(req.get("next") or "/")
     if not nxt.startswith("/") or nxt.startswith("//"):
         nxt = "/"

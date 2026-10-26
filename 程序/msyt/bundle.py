@@ -308,12 +308,20 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                 z.writestr("msyt-helper.py", f.read())
 
         # ---- 4. 说明 ----
+        _alt_all = server_alt_all.strip() or (server_alt.strip() if server_alt else "")
+        _alt_lines = [x.strip() for x in _alt_all.splitlines() if x.strip()]
         z.writestr("说明.txt", README.replace("{HELPER_PORT}", str(helper_port)) +
                    "\n\n控制面地址（下载时按「你此刻访问的地址 + 服务器部署配置」生成）：\n"
                    "    主用：" + server + "\n" +
-                   ("    备用：" + server_alt + "\n"
-                    "    （agent 启动时会自己探一下，主地址不通就换备用）\n"
-                    if server_alt else "")
+                   ("    备用：\n" + "".join("      · " + x + "\n" for x in _alt_lines) +
+                    "    （agent 启动时会自己探一下，主地址不通就换备用；\n"
+                    "      隧道换地址后重新下包，备用地址也会跟着更新）\n"
+                    if _alt_lines else "")
+                   + "\n【浏览器访问要口令】\n"
+                     "  网站为了挡住外网人的好奇访问，开了**访问口令**：\n"
+                     "  浏览器打开网站时先要输一次口令（输一次就记 7 天）。\n"
+                     "  ★ **agent 不需要口令** —— 它走的是专用通道，不受影响。\n"
+                     "  口令由管理员单独发给你，**不要转发**。\n"
                    + "\n本机小助手端口：" + str(helper_port)
                    + "（网页也用这个端口呼叫它；想改就改 helper-port.txt）\n")
         z.writestr("server.txt", server + "\n")
