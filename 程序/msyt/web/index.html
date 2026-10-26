@@ -313,6 +313,10 @@
         再点「开始采集」会被拒 —— 两个任务会重复请求同一批页、互相踩水位线。
         <b>不同节点之间允许并行</b>：管理员本机与各成员各采各的，靠 tid 幂等去重汇总
         （详见《分布式抓取协作方案》）。</p>
+      <div id="job-bar" class="jobbar">
+        <button class="tiny" id="btn-jobs-clear">清理已结束的任务</button>
+        <span class="dim">只删「任务运行记录」与它的日志，**不动采集结果**（库里的帖/正文/队列一行都不动）</span>
+      </div>
       <div id="job-list" class="joblist"></div>
       <div id="job-log" class="logbox"><p class="hint">选择一个任务查看实时日志。</p></div>
     </div>

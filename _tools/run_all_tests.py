@@ -69,5 +69,32 @@ for fn in files:
                 print(f"        {line.strip()[:110]}")
 
 print("=" * 70)
+
+# ---- 收尾：把回归留下的**任务运行记录**清掉（2026-10-26 加）
+#   回归里几十个脚本会起真实任务（详情/列表/体检）→ 全都留在
+#   「任务运行情况」里刷屏，管理员根本看不见真正在跑的那个。
+#   这里调一次 DELETE /api/jobs/clear 收干净。
+#   ★ 清的是**运行记录**，不碰采集结果（库里的数据一行不动）。
+try:
+    import json as _json
+    import urllib.request as _ur
+
+    def _api(method, path, body=None, token=""):
+        data = _json.dumps(body).encode() if body is not None else None
+        req = _ur.Request("http://127.0.0.1:8765" + path, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", "msyt-agent/1.1")
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        with _ur.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read().decode("utf-8", "replace"))
+
+    _tok = _api("POST", "/api/auth/login",
+                {"email": "qa-admin@example.com", "password": "qa-test-password"}).get("token", "")
+    _r = _api("POST", "/api/jobs/clear", {}, _tok)
+    print(f"  [收尾] 已清理回归留下的任务记录：{_r.get('removed', 0)} 条")
+except Exception as _e:                                    # noqa: BLE001
+    print(f"  [收尾] 清理任务记录失败（不影响回归结论）：{type(_e).__name__}: {_e}")
+
 print(f"总计：{total_ok}/{total_n} 项通过，失败 {total_fail} 项")
 sys.exit(0 if total_fail == 0 else 1)

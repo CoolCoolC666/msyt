@@ -1334,6 +1334,8 @@ async function loadJobs() {
       <span class="st">${j.elapsed}s · ${j.log_count} 行日志${jobProgressText(j)}</span>
       ${j.state === 'running'
         ? `<button class="tiny danger" data-stop="${j.id}">停止</button>` : ''}
+      ${j.state !== 'running'
+        ? `<button class="tiny danger" data-del="${j.id}">删除</button>` : ''}
     </div>`;
   }).join('');
 
@@ -1346,10 +1348,42 @@ async function loadJobs() {
           .catch(e => toast(e.message, true));
         return;
       }
+      if (ev.target.dataset.del) {
+        // ★ 删除的是**任务运行记录**（含日志），不是采集结果
+        ev.stopPropagation();
+        const jid = ev.target.dataset.del;
+        if (!confirm('删掉这条任务运行记录？（只删记录和日志，采集结果不动）')) return;
+        api(`/api/jobs/${jid}`, { method: 'DELETE' })
+          .then(() => {
+            if (state.selJob === jid) state.selJob = '';
+            toast('已删除该任务记录');
+            loadJobs();
+          })
+          .catch(e => toast(e.message, true));
+        return;
+      }
       state.selJob = el.dataset.jid;
       loadJobs();
     };
   });
+
+  // 顶部「清理已结束的任务」（管理员专属；成员看不到）
+  const bar = $('#job-bar');
+  if (bar) bar.style.display = isMemberView() ? 'none' : '';
+  const clearBtn = $('#btn-jobs-clear');
+  if (clearBtn && !clearBtn.dataset.bound) {
+    clearBtn.dataset.bound = '1';
+    clearBtn.onclick = () => {
+      if (!confirm('清理所有**已结束**的任务记录？（运行中的保留，采集结果不动）')) return;
+      api('/api/jobs/clear', { method: 'POST' })
+        .then(r => {
+          state.selJob = '';
+          toast(`已清理 ${r.removed} 条任务记录`);
+          loadJobs();
+        })
+        .catch(e => toast(e.message, true));
+    };
+  }
 
   if (state.selJob) showJobLog(state.selJob);
 }

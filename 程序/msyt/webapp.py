@@ -344,6 +344,31 @@ class JobManager:
         return [{k: v for k, v in j.to_dict(tail=0).items() if k != "logs"}
                 for j in jobs]
 
+    def remove(self, jid: str) -> bool:
+        """删掉**一个已结束**的任务（连同它的日志）。"""
+        with self._lock:
+            job = self._jobs.get(jid)
+            if job is None:
+                return False
+            if job.state == "running":
+                raise HTTPException(400, "任务还在跑 —— 先停止再删")
+            del self._jobs[jid]
+            return True
+
+    def clear_finished(self) -> int:
+        """删掉**所有已结束**的任务，返回删了几条。
+
+        ★ 为什么要有这个：任务表只保留最近 50 条，回归测试每跑一轮
+          就会留下一堆「已完成」的详情/列表/体检任务 → 把「任务运行情况」
+          刷成一片噪音，管理员根本看不见真正在跑的那个。
+        ★ **运行中的不删**（那是真的在采集）。
+        """
+        with self._lock:
+            gone = [jid for jid, j in self._jobs.items() if j.state != "running"]
+            for jid in gone:
+                del self._jobs[jid]
+            return len(gone)
+
     def spawn(self, job: Job, fn: Callable[[Job], Dict[str, Any]]) -> Job:
         def runner() -> None:
             try:
@@ -1279,6 +1304,33 @@ def api_job_stop(request: Request, jid: str) -> Dict[str, Any]:
     job.stop_requested = True
     job.log("已请求停止（将在下一个页/帖的边界停下）")
     return {"job": job.to_dict(tail=0)}
+
+
+@app.delete("/api/jobs/{jid}")
+def api_job_delete(request: Request, jid: str) -> Dict[str, Any]:
+    """**删掉一个已结束的任务**（连同它的日志）。
+
+    ★ 管理员专属：这是**管理动作**（清界面噪音），不是成员自己的数据。
+    ★ 只删**任务运行记录**，**不碰采集结果** ——
+      库里的帖/正文/队列一行都不动（那是权威数据，删不得）。
+    ★ 运行中的任务不给删 —— 先「停止」再删。
+    """
+    require_admin(request)
+    if not JOBS.remove(jid):
+        raise HTTPException(404, f"任务 {jid} 不存在")
+    return {"ok": True, "id": jid}
+
+
+@app.post("/api/jobs/clear")
+def api_jobs_clear(request: Request) -> Dict[str, Any]:
+    """**一键清理所有已结束的任务**（管理员专属）。
+
+    ★ 回归测试每跑一轮就留下一堆已完成任务 → 界面被刷成噪音。
+      这个接口把它们一次性收掉；**运行中的任务保留**。
+    """
+    require_admin(request)
+    n = JOBS.clear_finished()
+    return {"ok": True, "removed": n}
 
 
 @app.post("/api/export")
