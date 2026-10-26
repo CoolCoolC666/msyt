@@ -63,6 +63,12 @@ def main() -> int:
     print("启动凭证（一次性票据）全链路验收")
     print("=" * 78)
 
+    # ★ 公网不可达 → 跳过（2026-10-26）
+    #   本机所在网络若拦了该域名的 TLS 握手，票据兑换就无从谈起 ——
+    #   那是网络环境的问题，不是「票据流程坏了」。
+    from net_probe import skip_if_unreachable
+    skip_if_unreachable()
+
     st, d = call(LOCAL, "/api/auth/login",
                  {"email": ADMIN[0], "password": ADMIN[1]})
     tok = d.get("token", "")

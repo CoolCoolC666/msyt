@@ -223,6 +223,9 @@ class Agent:
         #: 进度行的节流时间（2026-10-25）
         self._last_progress = 0.0
         self._prog_start = 0.0
+        #: ★ 本批基准（2026-10-25）：本批已采 = 累计 − 这个值
+        #:   速率与「还剩」都要按**本批**算，不能拿跨批累计除以本批用时。
+        self._batch_base = 0
         #: 每个线程一份 HTTP 会话（requests.Session 不适合多线程共用）
         self._tls = threading.local()
         #: 本机采集（指定帖）路径的计数（并发时共享 → 加锁）
@@ -1071,7 +1074,8 @@ class Agent:
         if tids:
             code = f"LOCAL:{self.node or 'member'}"
             self._c_local_ok = self._c_local_failed = self._c_local_restricted = 0
-            self._progress_reset()
+            # ★ 本批基准 = 0（本机是一次性的一批，计数从头开始）
+            self._progress_reset(0)
             if self.workers > 1:
                 # ★ 并发采这些帖（2026-10-25 加）
                 #   每线程：自己的 HTTP 会话、自己的内存库、自己的 Client
@@ -1283,19 +1287,48 @@ class Agent:
           本机助手面板靠 `tid=\\d+ ✓` 这条正则数「已完成 N 帖」——
           去掉逐帖行，面板会永远显示 0（实测踩过）。
           → 逐帖行照旧，另加每 5 秒一行的进度（带剩余量）。
+
+        ★★ 速率与「还剩」必须是**本批口径**（2026-10-25 用户指出算法不对）
+          原来：速率 = **累计**已采 ÷ **本批**已用时
+          → 跑久了分子越滚越大、分母每批重置 → 速率虚高
+            （实测：累计 122 帖 ÷ 本批 53 秒 = 2.3 帖/秒，看着正常，
+              但那 122 帖里有 100 帖是上一批早采完的）
+          → 「还剩」也错：拿**累计**去减**本批总数** → 跨批后恒为 0。
+
+          现在（等价于用户说的「总篇次取余(批次) ÷ 当前批次用时」）：
+            · 本批已采 = 累计 − 本批起点（`_batch_base`）
+            · 还  剩   = 本批总数 − 本批已采
+            · 本批用时 = now − 本批起点（`_prog_start`）
+            · 速  率   = 本批已采 ÷ 本批用时
+          ★ 用「本批起点」而不是直接取余 %：跨批那一瞬 % 会归零，
+            出现「本批 0/50 帖」的怪数字（实测过）。
         """
         now = time.time()
         if now - self._last_progress < 5.0:
             return
         self._last_progress = now
-        left = max(0, total - processed)
-        rate = processed / max(0.001, now - self._prog_start)
-        self.log(f"[{label}] 进度：已采 {processed:,} 帖｜还剩 {left:,} 帖"
-                 f"｜用时 {now - self._prog_start:.0f}s｜{rate:.1f} 帖/秒")
+        with self._lock:
+            base = self._batch_base
+        cum = max(0, int(processed))
+        in_batch = max(0, cum - base)             # ★ 本批已采
+        left = max(0, int(total) - in_batch)     # ★ 本批还剩
+        el = max(0.001, now - self._prog_start)  # ★ 本批用时
+        rate = in_batch / el                      # ★ 本批速率
+        self.log(f"[{label}] 进度：本批 {in_batch:,}/{int(total):,} 帖"
+                 f"｜还剩 {left:,} 帖"
+                 f"｜本批用时 {el:.0f}s｜{rate:.1f} 帖/秒"
+                 f"｜累计 {cum:,} 帖")
 
-    def _progress_reset(self) -> None:
+    def _progress_reset(self, base: int = 0) -> None:
+        """开新一批：重置节流时间、本批起点、**本批基准**。
+
+        `base` = 这一刻的累计数 → 之后「累计 − base」就是本批已采。
+        ★ 必须由调用方传入（两套计数器：本机 `_c_local_*` vs 协作 `_c_*`），
+          在这里取会串口径。
+        """
         self._last_progress = time.time()
         self._prog_start = self._last_progress
+        self._batch_base = int(base)
 
     def _process_pick(self, p: Dict[str, Any]) -> str:
         """采一条领到的活并回传。
@@ -1461,7 +1494,10 @@ class Agent:
                 #   （正则 /领走 (\d+) 帖/）。不打的话面板永远显示 0，
                 #   用户看着就像"什么都没采"（实测踩过，正是用户反馈的那点）。
                 self.log(f"领走 {len(picks)} 帖")
-                self._progress_reset()      # 进度行（每 5 秒一行，带剩余量）
+                # 进度行（每 5 秒一行，带剩余量）
+                # ★ base = 这一刻的**累计** → 之后「累计 − base」= 本批已采
+                self._progress_reset(self._c_done + self._c_failed
+                                    + self._c_restricted)
                 _processed = [0]
                 if self.workers > 1:
                     # ★ 并发采这一批领到的活（2026-10-25 加）

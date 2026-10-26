@@ -23,7 +23,12 @@ import urllib.error
 import urllib.request
 
 ROOT = r"【项目根】"
-PKG = r"【成员端启动包】"
+# ★ 启动包位置**不写死**（2026-10-25：它从桌面搬到了 02 同级）
+from bundle_path import find_bundle
+PKG = find_bundle()
+if not PKG:
+    print('本机没有成员端启动包 → 跳过')
+    sys.exit(0)
 BASE = "http://127.0.0.1:8765"
 EMAIL, PW = "test@example.com", "test-password"
 
@@ -129,3 +134,4 @@ print("=" * 72)
 print(f"共 {OK + FAIL} 项 · 通过 {OK} · 失败 {FAIL}")
 print("=" * 72)
 sys.exit(0 if FAIL == 0 else 1)
+
