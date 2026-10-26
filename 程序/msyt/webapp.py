@@ -2300,8 +2300,14 @@ def api_agent_bundle(request: Request) -> Response:
 
       | 下载来源 | 主用 | 备用 |
       |---|---|---|
-      | **本地**（127.0.0.1 / localhost） | 本地地址（本地调试，agent 直连本机） | agentapi 子域名（公网） |
-      | **公网** | agentapi 子域名（**绕过 Access**，agent 唯一能直连的） | 下载者访问的地址 |
+      | **本地**（127.0.0.1 / localhost） | 本地地址（agent 直连本机，**不绕公网**） | 隧道地址池里活着的公网入口 |
+      | **公网** | 下载者此刻访问的地址（= 我们的域名，agent 连域名） | 隧道地址池里活着的其它入口 |
+
+      ★ 2026-10-26 订正：原设计是「公网下载 → 主地址用 agentapi 子域名
+        （理由：Access 对它 bypass）」。但现在**没有 Cloudflare Access**
+        （改成了隧道 + 站点访问口令门），且 `.example-tld` 后缀**境内按 SNI 封锁**
+        —— 当主地址等于「每次先探一个死地址」。现改为**主用 = 下载者此刻
+        访问的地址**，两种场景的主地址当下都确定可达。
 
       agent 启动时**自己探一下**：主地址不通就换备用 ——
       组员不必为了换个地址重下包。
@@ -2324,18 +2330,48 @@ def api_agent_bundle(request: Request) -> Response:
     host = origin.split("//", 1)[-1].split(":", 1)[0].lower()
     is_local = host in ("127.0.0.1", "localhost", "::1") or host.startswith("127.")
 
-    if is_local:
-        # 本地调试：agent 直连本机最省事；公网当备用
-        primary, alt = origin, api_base
-    else:
-        # 公网访问：agentapi 子域名是它唯一能直连的（Access 对它 bypass）
-        primary, alt = api_base, origin
-    if primary == alt:
+    # ★ 隧道地址池（当前活着的公网入口）
+    eps, _ = _current_endpoints()
+
+    # ★★ 主地址 = **下载者此刻访问的地址**（2026-10-26 改）：
+    #   原设计是「公网访问 → 主地址用 agentapi 子域名」，理由是
+    #   「Access 对它 bypass，agent 唯一能直连的」。
+    #   ★ 但现在**根本没有 Cloudflare Access**（改成隧道 + 站点访问口令门），
+    #     而 `.example-tld` 这个后缀**境内按 SNI 封锁**（实测 TLS 握手即被 RST）——
+    #     把它当主地址 = 每次启动都**先探一个连不上的地址**，
+    #     白等一轮超时，组员那边还会以为是「网络抖动」。
+    #   → 现在的规则（也正是用户要的机制）：
+    #       · **管理员本机**下载 → 主地址 = 127.0.0.1:8765（agent 直连本机，
+    #         不绕公网、不暴露自己的公网地址）
+    #       · **成员从公网**下载 → 主地址 = 他此刻正在用的那个域名
+    #         （agent 连我们的域名，不连一个死地址）
+    #   → 两种情况下主地址都是**当下确定可达**的那个。
+    primary = origin
+    # ★ 备用地址：**活的排前面**，`agent-api-base.txt` 里的那个排最后兜底。
+    #   （去重 + 不含主地址自己 —— 否则 server-alt.txt 里会出现重复行，
+    #     agent 会把同一个地址探两遍。）
+    # ★ 去重/排除按 **host+port** 比较，**不比较协议**：
+    #   浏览器走 https → origin 是 https://x，
+    #   而地址池里记的可能是 http://x（反代/回源口径不同）——
+    #   按整串比较就会把主地址自己又塞进备用池里。
+    def _hp(u: str) -> str:
+        s = (u or "").strip().rstrip("/")
+        s = s.split("://", 1)[-1]
+        return s.lower()
+
+    _seen = {_hp(primary)}
+    _alive: List[str] = []
+    for u in ([u for u in eps if u] + ([api_base] if api_base else [])):
+        k = _hp(u)
+        if k and k not in _seen:
+            _seen.add(k)
+            _alive.append(u)
+    alt = _alive[0] if _alive else ""
+    if _hp(primary) == _hp(alt):
         alt = ""
     # ★ 备用地址写成**多行**（2026-10-26）：隧道守护维持多条隧道，
     #   每条一个地址 → 全写进 `server-alt.txt`，组员哪条通就用哪条。
-    eps, _ = _current_endpoints()
-    alt_all = "\n".join([u for u in ([alt] + eps) if u])
+    alt_all = "\n".join(_alive)
 
     ticket = new_secret()[:32]
     now = time.time()

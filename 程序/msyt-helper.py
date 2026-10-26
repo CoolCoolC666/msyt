@@ -105,13 +105,84 @@ LOCK = threading.Lock()
 UA = "msyt-helper/1.1"
 
 
+def _local_agent_pids() -> list:
+    """本机还在跑的 `msyt agent` 进程（pid 列表）。
+
+    ★ 为什么需要（2026-10-26 修）：
+      网页点一次「启动本机 agent」→ 起一个 agent 进程。
+      如果**日志泵**中途崩了（曾因 Windows 控制台 GBK 编不了「✓」而崩），
+      网页会误以为 agent 死了 → 管理员再点一次 → **又起一个**。
+      同账号的 agent **node_id 相同** → 它们会互相抢活、
+      又在各自启动/退出时把对方的活退掉 → 池子效率崩掉、
+      界面一直显示「在等活」。
+      所以起之前先看看**本机是不是已经有 agent 在跑**。
+
+    ★ 怎么查：Windows 上用 CIM 读进程命令行（认 `-m msyt agent`）。
+      查不到就返回空列表（宁可放行，也不要因为查不到就拦住人家采集）。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\""
+             " | Where-Object { $_.CommandLine -like '*-m msyt agent*' }"
+             " | Select-Object -ExpandProperty ProcessId) -join ','"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20)
+        raw = (out.stdout or "").strip()
+        pids = []
+        for chunk in raw.replace(";", ",").split(","):
+            chunk = chunk.strip()
+            if chunk.isdigit():
+                pids.append(int(chunk))
+        return pids
+    except Exception:                                 # noqa: BLE001
+        return []
+
+
+def _kill_local_agents(exclude_pid: int = 0) -> int:
+    """把本机所有 msyt agent 进程停掉（除了 exclude_pid）。
+
+    返回杀掉的个数。★ 停的是**自己机器上**的采集进程 ——
+    属于「可恢复的常规操作」，不是删数据。
+    """
+    n = 0
+    for pid in _local_agent_pids():
+        if exclude_pid and pid == exclude_pid:
+            continue
+        try:
+            os.kill(pid, 15)          # SIGTERM：让它自己退活
+            n += 1
+        except Exception:                                 # noqa: BLE001
+            try:
+                os.kill(pid, 9)
+                n += 1
+            except Exception:                             # noqa: BLE001
+                pass
+    return n
+
+
 def log(msg: str) -> None:
     with LOCK:
         STATE["log"].append({"t": time.time(), "m": str(msg)})
     try:
         print(msg, flush=True)
-    except UnicodeEncodeError:                       # Windows 控制台 GBK 会打挂 print
-        print(msg.encode("utf-8", "replace").decode("ascii", "replace"), flush=True)
+    except UnicodeEncodeError:
+        # ★ Windows 控制台是 GBK，编不了「✓」「↻」「⚠」这类字符。
+        #   ★ 原来的兜底 `decode("ascii","replace")` **是个坑**：
+        #     replace 会造出 U+FFFD（�），而 **U+FFFD 在 GBK 里同样编不了**
+        #     → 兜底的兜底再抛一次 UnicodeEncodeError
+        #     → 逃出日志泵的循环 → 被 except 静默吞掉
+        #     → 误报「agent 已退出」，**可 agent 其实活得好好的**。
+        #   （实测踩到：agent 打了「✓ …可达」，pump 当场崩，
+        #     之后 agent 继续采、网页却再也看不到它的日志，
+        #     管理员以为它死了就再点一次启动 → 堆出一堆同 node_id 的 agent
+        #     互相抢活、互相退活。）
+        #   正解：**绕开文本编码器**，直接往 stdout 的**二进制缓冲**写 UTF-8 字节。
+        try:
+            sys.stdout.buffer.write(str(msg).encode("utf-8", "replace") + b"\n")
+            sys.stdout.buffer.flush()
+        except Exception:                             # noqa: BLE001
+            pass
 
 
 # ------------------------------------------------------------------ 与控制面说话
@@ -496,6 +567,25 @@ class Handler(BaseHTTPRequestHandler):
             proc = STATE["proc"]
             if proc is not None and proc.poll() is None:
                 return {"ok": True, "already": True, "pid": proc.pid}
+        # ★★ 同机互斥（2026-10-26 修）：
+        #   就算 STATE["proc"] 说没在跑，也要查**进程表** ——
+        #   日志泵崩过一次之后，STATE["proc"] 会指向一个已经没人管的旧进程，
+        #   而真正的采集进程可能还活着（网页却显示「已退出」）。
+        #   这时再点一次「启动」就会起第二个 → 同 node_id 的两个 agent
+        #   互相抢活、互相退活 → 池子被占死、界面一直显示「在等活」。
+        #   所以：**本机已经有 agent 在跑，就不要再起第二个**。
+        _live = [p for p in _local_agent_pids() if p != os.getpid()]
+        if _live:
+            with LOCK:
+                STATE["proc"] = None
+            log(f"⚠ 本机已经有 agent 在运行（pid {', '.join(map(str, _live))}）"
+                "—— 就不再重复启动第二个了")
+            log("  （同一账号的多个 agent 会互相抢活、互相退活，"
+                "反而拖慢采集；要重起请先点「停止」）")
+            return {"ok": True, "already": True,
+                    "pid": _live[0],
+                    "message": f"本机已有 agent 在运行（pid {_live[0]}），"
+                               "没有重复启动"}
         here = os.path.dirname(os.path.abspath(__file__))
         cmd = [sys.executable, "-m", "msyt", "agent",
                "--server", STATE["server"]]
@@ -579,6 +669,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "pid": proc.pid, "cred_src": src, "local": local_mode}
 
     def _pump(self, proc):
+        crashed = None
         try:
             for line in proc.stdout:
                 line = line.rstrip()
@@ -618,18 +709,50 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         STATE["stat_failed"] += 1
                 log("[agent] " + line)
-        except Exception:                            # noqa: BLE001
-            pass
+        except Exception as e:                         # noqa: BLE001
+            crashed = f"{type(e).__name__}: {e}"
         finally:
-            log("agent 已退出")
+            # ★★ 别再无条件说「agent 已退出」了（2026-10-26 修）：
+            #   原来 pump 一旦中途抛异常（最常见是控制台 GBK 编不了「✓」）
+            #   → 循环退出 → 走 finally → 打「agent 已退出」
+            #   → **可 agent 进程其实活得好好的，还在采集**。
+            #   网页据此显示「已停止」，管理员就再点一次启动
+            #   → 堆出一堆同账号同 node_id 的 agent 互相抢活、互相退活。
+            #   现在按**进程是否真的结束**分两种说法：
+            #     · 进程还在 → 「日志读取中断，但 agent 仍在运行」（别再启一个）
+            #     · 进程真结束 → 「agent 已退出」
+            alive = proc.poll() is None
+            if crashed and alive:
+                log(f"⚠ 日志读取中断（{crashed}）—— 但 agent **仍在运行**"
+                    f"（pid {proc.pid}），别重复启动它")
+                log("  （这是助手读日志时出的问题，不是采集出错；"
+                    "日志可能不再更新，但 agent 仍在按协作流程采集）")
+            elif alive:
+                log(f"⚠ agent 日志读取结束，但进程仍在运行（pid {proc.pid}）")
+            else:
+                log("agent 已退出")
             with LOCK:
-                STATE["agent_state"] = ""
-                STATE["agent_state_at"] = 0.0
+                if alive:
+                    # 进程还活着 → **不要**清空状态（否则网页误以为没在跑）
+                    STATE["agent_state_note"] = (
+                        STATE.get("agent_state_note")
+                        or "日志读取中断，agent 仍在运行")
+                else:
+                    STATE["agent_state"] = ""
+                    STATE["agent_state_at"] = 0.0
 
     def stop(self):
         with LOCK:
             proc = STATE["proc"]
+        # ★ 先按**进程表**把本机所有 msyt agent 都收掉（2026-10-26 加）：
+        #   网页的「停止」以前只杀 STATE["proc"] 指向的那一个 →
+        #   如果之前重复启动过、STATE["proc"] 早被覆盖，
+        #   那些**同 node_id 的孤儿 agent** 会继续跑、继续抢活、继续退活。
+        killed = _kill_local_agents(exclude_pid=(proc.pid if proc else None))
         if proc is None or proc.poll() is not None:
+            if killed:
+                log(f"已清理本机 {killed} 个残留 agent 进程")
+                return {"ok": True, "running": False, "killed": killed}
             return {"ok": True, "running": False}
         proc.terminate()
         try:
@@ -637,7 +760,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:                            # noqa: BLE001
             proc.kill()
         log("已要求 agent 停止")
-        return {"ok": True, "running": False}
+        if killed:
+            log(f"已清理本机 {killed} 个残留 agent 进程")
+        return {"ok": True, "running": False, "killed": killed}
 
 
 def main() -> int:

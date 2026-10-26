@@ -30,7 +30,7 @@ EMAIL, PW = "test@example.com", "test-password"
 
 # ★ 地址**探测**而不是写死（2026-10-26）：公网入口是隧道地址，会变
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from net_probe import current_agent_api, current_public  # noqa: E402
+from net_probe import current_agent_api, current_public, current_endpoints  # noqa: E402
 API_BASE = current_agent_api()       # 当前部署的公网入口
 PUBLIC_HOST = current_public().split("//", 1)[-1].split("/", 1)[0]
 
@@ -69,6 +69,17 @@ def req(path, data=None, token=None, host=None, raw=False, method=None):
             return e.code, (b if raw else json.loads(b.decode("utf-8")))
         except Exception:
             return e.code, {}
+
+
+def _hp(u):
+    """地址的 host+port（**忽略协议**）—— 比较地址是否同一个时用。
+
+    ★ 2026-10-26：浏览器走 https → origin 是 https://x，
+      而地址池里记的可能是 http://x（回源/反代口径不同），
+      按整串比较会把同一个地址当成两个。
+    """
+    s = (u or "").strip().rstrip("/").split("://", 1)[-1]
+    return s.lower()
 
 
 def read_pkg(data):
@@ -125,9 +136,24 @@ check("包能下载", st == 200, f"HTTP {st}")
 p2 = read_pkg(z2)
 print(f"   主用 = {p2['server']}")
 print(f"   备用 = {p2['alt'] or '(无)'}")
-check("★ 公网下载 → 主用是当前部署的公网入口",
-      p2["server"] == API_BASE, p2["server"])
-check("★ 公网下载 → 备用是访问地址", p2["alt"] != "", p2["alt"])
+check("★ 公网下载 → 主用是**下载者此刻访问的地址**（2026-10-26 订正）",
+      PUBLIC_HOST in (p2["server"] or ""), p2["server"])
+# ★ 原断言是「主用 = 当前部署的公网入口（agentapi 子域名）」，
+#   理由是「Access 对它 bypass，agent 唯一能直连的」。
+#   现已订正：那套 Access 早就不用了（改成隧道 + 站点访问口令门），
+#   且 `.example-tld` 后缀境内按 SNI 封锁 —— 当主地址等于「每次先探一个死地址」。
+#   现规则：主用 = 下载者此刻访问的地址；备用 = 地址池里活着的其它入口。
+# ★ server-alt.txt 是**多行**的（一行一个地址）→ 按行判。
+_alt_lines = [x.strip() for x in (p2["alt"] or "").splitlines() if x.strip()]
+check("★ 公网下载 → 备用非空且**不含主地址自己**",
+      bool(_alt_lines)
+      and all(_hp(x) != _hp(p2["server"] or "") for x in _alt_lines),
+      p2["alt"])
+check("★ 公网下载 → 备用是当前部署的**其它**公网入口",
+      bool(current_endpoints())
+      and all(any(_hp(x) == _hp(e) for e in current_endpoints())
+              for x in _alt_lines),
+      f"alt={_alt_lines} / eps={current_endpoints()}")
 
 # ---------------------------------------------------------------- ③ 差异
 print("\n③ 两种来源生成的包**确实不同**")
