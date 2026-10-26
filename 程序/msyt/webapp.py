@@ -44,9 +44,11 @@ import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse, Response,
+                              StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -121,6 +123,109 @@ async def _restrict_agent_host(request: Request, call_next):
             return JSONResponse(
                 {"detail": f"该域名只开放 {AGENT_API_PREFIX}（agent 专用）"},
                 status_code=403)
+    return await call_next(request)
+
+
+# ====================================================================== 公网加固
+# ★ 背景（2026-10-26 实测）
+#   公网入口是 Cloudflare **quick tunnel**，它上面**没有 Cloudflare Access**
+#   （Access 只能挂在命名隧道的固定 Public Hostname 上）→ 匿名访客能直接
+#   摸到这个 Web 应用。实测匿名能拿到：
+#     · `/docs` + `/openapi.json` → **58 个接口的完整地图**（含字段名）
+#     · `/api/health` → **本机绝对路径**（含用户名、盘符、项目名）
+#     · `/` 首页 → **采集目标站名**（天一论坛 · 群众留言板）
+#   数据接口本身有鉴权（401），但「地图」本身就够外网人定位我们了。
+#
+# ★ 这一段做四件事：
+#   ① 本机判定（看 **Host**，不看 client.host —— cloudflared 是本机回源的，
+#      用 client.host 会把公网访客当成本机用户放过去，等于加固白做）
+#   ② 关闭 Swagger / openapi（只对本机开放）
+#   ③ `/api/health` 公网只回 `{"ok": true}`
+#   ④ 站点访问口令（可选启用：`程序/data/gate-key.txt` 存在且非空即开）
+
+
+def _host_of(request: Request) -> str:
+    return (request.headers.get("host") or "").split(":")[0].lower()
+
+
+def _is_local_request(request: Request) -> bool:
+    """这个请求是不是**本机浏览器**发出来的？
+
+    ★ 为什么看 Host 而不是 client.host：
+      cloudflared 在**本机**回源，所以经隧道进来的公网请求，
+      `request.client.host` 同样是 127.0.0.1 —— 用它判断会把
+      **公网访客当成本机用户**直接放过去。
+      Host 头不会被改：本机是 `127.0.0.1:8765` / `localhost`，
+      公网是 `xxx.trycloudflare.com`。
+    """
+    h = _host_of(request)
+    return h in ("localhost", "::1", "[::1]") or h.startswith("127.")
+
+
+def _gate_key() -> str:
+    """站点访问口令 —— `程序/data/gate-key.txt` 存在且非空即启用。"""
+    try:
+        p = Path(_cfg().db_path).parent / "gate-key.txt"
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _client_ip(request: Request) -> str:
+    """**真实客户端 IP**（限速必须用它）。
+
+    ★ 为什么不能用 `request.client.host`：
+      经 cloudflared 回源时它**恒为 127.0.0.1** —— 照它限速等于把
+      **全世界的公网访客算成同一个人**：
+      外人撞 10 次密码 → 全组成员一起被锁 5 分钟（自己人反被 DoS）；
+      而对单个攻击者来说，限速也几乎不起作用。
+      Cloudflare 边缘会带 `CF-Connecting-IP`（真实访客 IP），
+      其次 `X-Forwarded-For` 首段，最后才退回 client.host。
+    """
+    for h in ("cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
+        v = request.headers.get(h)
+        if v:
+            first = v.split(",")[0].strip()
+            if first:
+                return first
+    return request.client.host if request.client else "?"
+
+
+#: 口令门放行的路径（前缀匹配）
+#: ★ `/static/` **不在白名单里** —— 静态资源（CSS/JS）也会暴露项目结构与
+#:   注释指纹，匿名能拿到就没必要给。口令页是内联样式，不依赖 static。
+GATE_OPEN_PREFIXES = (
+    "/api/agent/",       # 组员 agent（机器上没浏览器，过不了任何网页登录门）
+    "/api/auth/login",   # 登录接口本身
+    "/api/auth/gate",    # 口令校验接口
+    "/api/health",       # 探活（隧道守护靠它判存活）
+    "/gate",
+    "/favicon.ico",
+)
+
+
+@app.middleware("http")
+async def _public_exposure_guard(request: Request, call_next):
+    """**公网暴露面收敛**（本机开发与组员 agent 都不受影响）。"""
+    path = request.url.path
+    local = _is_local_request(request)
+
+    # ① Swagger / openapi：只对本机开放
+    if not local and (path in ("/docs", "/redoc", "/openapi.json")
+                      or path.startswith("/docs/")):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+    # ② 站点访问口令（可选启用）
+    key = _gate_key()
+    if key and not local:
+        opened = (any(path.startswith(p) for p in GATE_OPEN_PREFIXES)
+                  or request.cookies.get("msyt_gate") == key
+                  or request.headers.get("x-msys-gate") == key)
+        if not opened:
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "需要访问口令"}, status_code=401)
+            return RedirectResponse(url=("/gate?next=" + quote(path)),
+                                    status_code=302)
     return await call_next(request)
 
 
@@ -510,7 +615,7 @@ def favicon():
 
 
 @app.get("/api/health")
-def api_health() -> Dict[str, Any]:
+def api_health(request: Request) -> Dict[str, Any]:
     cfg = _cfg()
     try:
         db = get_db(cfg)
@@ -522,6 +627,11 @@ def api_health() -> Dict[str, Any]:
         n = p = 0
         fts = False
         err = str(e)
+    # ★ 公网只回「活着没有」；库路径、条数、版本号**只给本机**。
+    #   db_path 是本机绝对路径（含用户名、盘符、项目名）—— 对外泄露等于
+    #   直接告诉外网人「这是谁在跑、跑的是什么项目」。
+    if not _is_local_request(request):
+        return {"ok": err is None}
     return {"ok": err is None, "error": err, "db_path": cfg.db_path,
             "db_exists": os.path.exists(cfg.db_path), "threads": n, "posts": p,
             "fts": fts, "version": app.version}
@@ -830,7 +940,7 @@ def api_agent_login(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
       于是把 agent 真正要用的接口**集中到 `/api/agent/*` 一个前缀下**，
       Access 只需要为这一个前缀放行（bypass），其余路径照旧受 Access 保护。
     """
-    ip = request.client.host if request.client else "?"
+    ip = _client_ip(request)
     if not _login_rate_ok(ip):
         raise HTTPException(429, "登录失败次数过多，请 5 分钟后再试")
     body = dict(req)
@@ -842,7 +952,7 @@ def api_agent_login(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
         #   于是 `return d` 返回字符串 'member' → 响应校验失败 → 500。
         #   （这个坑踩过一次：agent 登录一律 500，栈里只说 "Input should be a
         #    valid dictionary, input: 'member'"，不看返回结构根本猜不到。）
-        res = api_login(body)
+        res = _login_core(body)
     except HTTPException:
         _login_fail(ip)
         raise
@@ -939,6 +1049,27 @@ def _login_fail(ip: str) -> None:
 
 def _login_ok(ip: str) -> None:
     _LOGIN_FAIL.pop(ip, None)
+
+
+#: 注册限流（按 IP，内存计数）。公网上的陌生人能无限注册 pending 账号，
+#: 把 members 表灌垃圾 —— 登不进来，但会挤占管理界面、干扰审核。
+_REGISTER_HITS: Dict[str, List[float]] = {}
+_REGISTER_MAX = 5             # 1 小时内 5 次
+_REGISTER_WINDOW = 3600.0
+
+
+def _register_rate_ok(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _REGISTER_HITS.get(ip, []) if now - t < _REGISTER_WINDOW]
+    _REGISTER_HITS[ip] = hits
+    return len(hits) < _REGISTER_MAX
+
+
+def _register_hit(ip: str) -> None:
+    now = time.time()
+    hits = [t for t in _REGISTER_HITS.get(ip, []) if now - t < _REGISTER_WINDOW]
+    hits.append(now)
+    _REGISTER_HITS[ip] = hits
 
 
 @app.get("/api/jobs")
@@ -1275,7 +1406,35 @@ def _job_node(m: Dict[str, Any], requested: str = "") -> str:
 
 
 @app.post("/api/auth/login")
-def api_login(req: dict = Body(...)) -> Dict[str, Any]:
+def api_login(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**浏览器登录**（带失败限速 + 防枚举）。
+
+    ★ 为什么要限速：公网入口开着，登录口就是**撞库口**。
+      之前只有 `/api/agent/login` 那个别名限速，**主登录口没限** ——
+      外网人可以拿一串邮箱密码无限试。
+    ★ 为什么要模糊文案：`email_allowed` 原本会区分
+      「不在名单 / 待审核 / 已停用」→ 外网人拿邮箱一试就知道
+      **哪些邮箱是成员**（邮箱枚举）。现在统一成「邮箱或密码不对」，
+      只保留「待管理员审核」这一条（那是本人刚自助注册的人要看的）。
+    """
+    return _login_with_rate(request, req)
+
+
+def _login_with_rate(request: Request, req: dict) -> Dict[str, Any]:
+    ip = _client_ip(request)
+    if not _login_rate_ok(ip):
+        raise HTTPException(429, "登录失败次数过多，请 5 分钟后再试")
+    try:
+        res = _login_core(req)
+    except HTTPException:
+        _login_fail(ip)
+        time.sleep(0.25)          # 慢一点，别让密码被高速枚举
+        raise
+    _login_ok(ip)
+    return res
+
+
+def _login_core(req: dict) -> Dict[str, Any]:
     cfg = _cfg()
     db = get_db(cfg)
     email = str(req.get("email") or "").strip().lower()
@@ -1284,10 +1443,14 @@ def api_login(req: dict = Body(...)) -> Dict[str, Any]:
     allow_domains = str((cfg.extra or {}).get("allow_domains") or "")
     ok, why = email_allowed(email, members, allow_domains)
     if not ok:
-        raise HTTPException(401, why)
+        # 「待审核」保留原文（本人自助注册后要知道去等管理员），
+        # 其余一律模糊 → 防**邮箱枚举**（外人试邮箱就能试出谁是成员）。
+        if "待管理员审核" in why:
+            raise HTTPException(401, why)
+        raise HTTPException(401, "邮箱或密码不对")
     m = members[email]
     if not verify_pw(pw, m["pw_hash"]):
-        raise HTTPException(401, "密码不对")
+        raise HTTPException(401, "邮箱或密码不对")
     node = m.get("node_id") or ("admin" if m.get("role") == "admin" else "member:" + email)
     if not m.get("node_id"):
         with db.lock:
@@ -1342,7 +1505,7 @@ def api_auth_config() -> Dict[str, Any]:
 
 
 @app.post("/api/auth/register")
-def api_register(req: dict = Body(...)) -> Dict[str, Any]:
+def api_register(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     """**自助注册**：填邮箱 + 密码即可申请一个成员账号。
 
     注册后账号状态为 `pending`（待管理员审核），**管理员在「成员名单」里点「通过」才能登录**。
@@ -1350,9 +1513,18 @@ def api_register(req: dict = Body(...)) -> Dict[str, Any]:
     若注册即可用，任何拿到域名的人都能开始打站方，把配额和风控预算烧掉。
 
     想改成「注册即可用」，在 config.json 里设 `"auto_approve_registration": true`。
+
+    ★ 公网加固（2026-10-26）：
+      ① **注册限速**（同 IP 1 小时 5 次）—— 陌生人可以无限注册 pending
+        账号，把 members 表灌满垃圾（虽然 pending 登不进来）。
+      ② 「已注册」提示改模糊 → 防**邮箱枚举**（外人拿邮箱一试，
+        就能确认哪些邮箱是成员）。
     """
     cfg = _cfg()
     db = get_db(cfg)
+    ip = _client_ip(request)
+    if not _register_rate_ok(ip):
+        raise HTTPException(429, "注册太频繁，请稍后再试")
     email = str(req.get("email") or "").strip().lower()
     pw = str(req.get("password") or "")
     if "@" not in email or "." not in email.split("@")[-1]:
@@ -1366,7 +1538,8 @@ def api_register(req: dict = Body(...)) -> Dict[str, Any]:
             raise HTTPException(403, f"该邮箱域名不在允许范围内（{allow_domains}）")
     with db.lock:
         if _member_by_email(db, email):
-            raise HTTPException(409, "该邮箱已注册过，请直接登录")
+            # 模糊文案：不告诉外人「这个邮箱是成员」
+            raise HTTPException(403, "该邮箱不可用或已注册")
         auto = bool((cfg.extra or {}).get("auto_approve_registration"))
         status = "active" if auto else "pending"
         node = f"member:{email}"
@@ -1377,6 +1550,7 @@ def api_register(req: dict = Body(...)) -> Dict[str, Any]:
              int((cfg.extra or {}).get("default_quota") or 50), "自助注册",
              time.strftime("%Y-%m-%d %H:%M:%S")))
         db.conn.commit()
+    _register_hit(ip)
     HUB.info("admin", f"新注册 {email}（状态 {status}）", task="")
     return {"ok": True, "email": email, "status": status, "node_id": node,
             "message": ("注册成功，可以登录了" if status == "active"
@@ -2186,6 +2360,87 @@ def index() -> Response:
     html = (html.replace("__CSSV__", _asset_ver("style.css"))
                 .replace("__JSV__", _asset_ver("app.js")))
     return Response(content=html, media_type="text/html; charset=utf-8")
+
+
+#: 访问口令页 —— 刻意**不出现**项目名、目标站名、任何业务信息。
+#:   外网人就算猜到地址，也只会看到一个中性验证页。
+GATE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>访问验证</title>
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center;
+         justify-content:center; background:#f4f6f8;
+         font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  .card { background:#fff; padding:32px 28px; border-radius:10px;
+          box-shadow:0 2px 14px rgba(0,0,0,.08); width:320px; }
+  h1 { font-size:17px; margin:0 0 6px; color:#222; }
+  p  { font-size:13px; color:#666; margin:0 0 18px; line-height:1.6; }
+  input { width:100%; box-sizing:border-box; padding:9px 10px; font-size:14px;
+          border:1px solid #d5d9de; border-radius:6px; }
+  button { width:100%; margin-top:12px; padding:10px; font-size:14px; cursor:pointer;
+           border:0; border-radius:6px; background:#2b6cb0; color:#fff; }
+  #err { color:#c0392b; font-size:13px; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+  <form class="card" onsubmit="return false;">
+    <h1>访问验证</h1>
+    <p>本系统仅供授权人员使用。请输入访问口令。</p>
+    <input id="k" type="password" placeholder="访问口令" autocomplete="off">
+    <button onclick="go()">进入</button>
+    <div id="err"></div>
+  </form>
+<script>
+async function go() {
+  var k = document.getElementById('k').value.trim();
+  var e = document.getElementById('err');
+  if (!k) { e.textContent = '请输入口令'; return; }
+  var next = new URLSearchParams(location.search).get('next') || '/';
+  try {
+    var r = await fetch('/api/auth/gate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: k, next: next})
+    });
+    if (r.ok) { location.href = next; return; }
+    e.textContent = '口令不对';
+  } catch (err) { e.textContent = '网络异常，请重试'; }
+}
+document.getElementById('k').addEventListener('keydown', function(ev){
+  if (ev.key === 'Enter') go();
+});
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/gate")
+def gate_page() -> Response:
+    """**访问口令页**（口令门启用时，未带口令的浏览器访问会先落到这里）。"""
+    if not _gate_key():
+        return RedirectResponse(url="/", status_code=302)
+    return Response(content=GATE_HTML, media_type="text/html; charset=utf-8")
+
+
+@app.post("/api/auth/gate")
+def api_gate(request: Request, req: dict = Body(...)) -> Response:
+    """校验访问口令 → 下发 Cookie（7 天）。"""
+    key = _gate_key()
+    if not key:
+        return JSONResponse({"ok": True, "next": "/"})
+    if str(req.get("key") or "").strip() != key:
+        time.sleep(0.3)              # 慢一点，别让口令被高速枚举
+        raise HTTPException(401, "口令不对")
+    nxt = str(req.get("next") or "/")
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    resp = JSONResponse({"ok": True, "next": nxt})
+    resp.set_cookie("msyt_gate", key, httponly=True, samesite="lax",
+                    max_age=7 * 24 * 3600, path="/")
+    return resp
 
 
 if WEB_DIR.exists():
