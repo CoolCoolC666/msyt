@@ -856,6 +856,45 @@ def api_agent_me(request: Request) -> Dict[str, Any]:
     return api_me(request)
 
 
+def _current_endpoints() -> tuple[List[str], str]:
+    """当前可用的公网入口列表 + 更新时间。
+
+    ★ 数据来自隧道守护写的 `data/agent-endpoints.json`
+      （`程序/tunnel.ps1` 每次隧道地址变了就重写它）。
+    """
+    p = Path(__file__).resolve().parent.parent / "data" / "agent-endpoints.json"
+    eps: List[str] = []
+    updated = ""
+    try:
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            for u in (d.get("endpoints") or []):
+                u = str(u).strip().rstrip("/")
+                if u and u not in eps:
+                    eps.append(u)
+            updated = str(d.get("updated_at") or "")
+    except Exception:                                        # noqa: BLE001
+        eps = []
+    return eps, updated
+
+
+@app.get("/api/agent/endpoints")
+def api_agent_endpoints() -> Dict[str, Any]:
+    """**当前可用的控制面地址列表**（隧道换地址后让 agent 自己捞回来）。
+
+    ★ 为什么开放这个（2026-10-26 加）：
+      公网入口是**隧道地址**，隧道一重启地址就变
+      （quick tunnel 每次给一个随机的 `*.trycloudflare.com`）。
+      只要还剩一条隧道活着，agent 就能从它这里拿到新地址列表、
+      自己接上 —— 组员不必挨个通知重下启动包。
+
+    ★ 只暴露**地址**，不含任何凭证（token/口令都不在这里）。
+    ★ 守护进程没在跑时返回空列表（agent 会退回文件里的候选）。
+    """
+    eps, updated = _current_endpoints()
+    return {"endpoints": eps, "updated_at": updated, "count": len(eps)}
+
+
 @app.post("/api/agent/pick")
 def api_agent_pick(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     """agent 领活（`/api/assist/pick` 的别名）。"""
@@ -2033,6 +2072,10 @@ def api_agent_bundle(request: Request) -> Response:
         primary, alt = api_base, origin
     if primary == alt:
         alt = ""
+    # ★ 备用地址写成**多行**（2026-10-26）：隧道守护维持多条隧道，
+    #   每条一个地址 → 全写进 `server-alt.txt`，组员哪条通就用哪条。
+    eps, _ = _current_endpoints()
+    alt_all = "\n".join([u for u in ([alt] + eps) if u])
 
     ticket = new_secret()[:32]
     now = time.time()
@@ -2052,6 +2095,7 @@ def api_agent_bundle(request: Request) -> Response:
         primary, ticket, str(pkg_dir),
         helper_src=str(pkg_dir / "msyt-helper.py"),
         server_alt=alt,
+        server_alt_all=alt_all,
         helper_port=_helper_port(),
         agent_workers=_detail_workers())
     return Response(

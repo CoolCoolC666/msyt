@@ -703,13 +703,22 @@ def main() -> int:
             pass
     STATE["ticket"] = tk
     # ★ 备用控制面地址（2026-10-23）：命令行给、或读同目录的 server-alt.txt
-    alt = (args.server_alt or "").strip()
+    # ★ 2026-10-26：`server-alt.txt` 现在是**一个地址一行**
+    #   （隧道换地址会写好几行进去）。
+    #   这里只取**第一行**当「备用地址」；其余的由 agent 自己读文件拿。
+    #   以前是把整个文件读成一个字符串 → 多行会拼成一个带换行的坏 URL。
+    _alt_raw = (args.server_alt or "").strip()
+    alt = _alt_raw.splitlines()[0] if _alt_raw else ""
     if not alt:
         try:
             p = os.path.join(here, "server-alt.txt")
             if os.path.exists(p):
                 with open(p, "r", encoding="utf-8") as f:
-                    alt = f.read().strip()
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            alt = line
+                            break
         except Exception:                             # noqa: BLE001
             alt = ""
     if alt.startswith("__MSYT_"):

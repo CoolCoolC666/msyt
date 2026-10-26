@@ -33,8 +33,8 @@ PROG = os.path.join(ROOT, "程序")
 sys.path.insert(0, PROG)
 
 LOCAL = "http://127.0.0.1:8765"
-PUBLIC = "https://msyt.example.com"        # 网页 UI 走这里（受 Access 保护）
-API = "https://agentapi.example.com"    # agent 走这里（Access bypass）
+# ★ 地址**探测**而不是写死（2026-10-26）：公网入口是隧道地址，会变
+from net_probe import PUBLIC, AGENT_API as API  # noqa: E402
 ADMIN = ("qa-admin@example.com", "qa-test-password")
 results = []
 
@@ -71,23 +71,27 @@ def main() -> int:
     tok = json.loads(call(LOCAL, "/api/auth/login",
                           {"email": ADMIN[0], "password": ADMIN[1]}))["token"]
 
-    # ---------- 1. 主域名仍受 Access 保护，API 子域名直连 ----------
-    # ⚠ 用「不跟随重定向」的 opener：urllib 默认会跟着 302 跳到 Access 登录页，
-    #   跳完是 200（HTML），会被误判成「防护没了」。
+    # ---------- 1. 公网入口的防护 = 程序自己的鉴权 ----------
+    # ★ 2026-10-26：公网入口改成了 **quick tunnel**（`*.trycloudflare.com`）——
+    #   那里**没有 Cloudflare Access 这一层**（Access 要挂在命名隧道的
+    #   Public Hostname 上，而隧道地址每次重启都变、没法挂）。
+    #   → 网页防护改由**程序自己的鉴权**承担：匿名请求管理端点必须被拒。
+    # ⚠ 仍用「不跟随重定向」的 opener：万一哪天又挂了 Access，
+    #   302 跳登录页会被跟成 200（HTML）→ 误判成「防护没了」。
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
     opener = urllib.request.build_opener(NoRedirect)
     try:
         r = opener.open(urllib.request.Request(
-            PUBLIC + "/api/health", headers={"User-Agent": "msyt-agent/1.1"}), timeout=30)
-        check("主域名对匿名请求仍被 Access 挡（应 302/403）", False,
-              f"★ 竟然 {r.status} —— 网页防护没了")
+            PUBLIC + "/api/members", headers={"User-Agent": "msyt-agent/1.1"}), timeout=30)
+        check("匿名请求管理端点被程序鉴权挡下（应 401/403）", False,
+              f"★ 竟然 {r.status} —— 管理面没防护")
     except urllib.error.HTTPError as e:
-        check("主域名对匿名请求仍被 Access 挡（应 302/403）",
-              e.code in (302, 403), f"HTTP {e.code}")
+        check("匿名请求管理端点被程序鉴权挡下（应 401/403）",
+              e.code in (401, 403), f"HTTP {e.code}")
     except Exception as e:
-        check("主域名对匿名请求仍被 Access 挡", True, f"{type(e).__name__}")
+        check("匿名请求管理端点被程序鉴权挡下", True, f"{type(e).__name__}")
 
     try:
         body = call(API, "/api/agent/me", token=tok)
@@ -102,15 +106,28 @@ def main() -> int:
         check("★ API 子域名上 /api/agent/me 返回 JSON", False,
               f"{type(e).__name__}: {e}")
 
+    # ★ 2026-10-26：公网入口不再是 `agentapi.` 前缀的域名（现在是隧道地址），
+    #   那条「按 Host 收紧路径」的中间件对它**不再触发** ——
+    #   于是「非管理员调不通管理接口」这条要求由**程序的角色鉴权**承担。
+    #   → 这里用**成员身份**去调管理端点，必须 403。
+    mtok = ""
+    try:
+        d = json.loads(call(API, "/api/agent/login",
+                            {"email": "test@example.com", "password": "test-password"}))
+        mtok = d.get("token") or d.get("access_token") or ""
+    except Exception as e:                                   # noqa: BLE001
+        print("  | 成员登录失败：", e)
+    check("★ 拿到成员令牌（用成员身份测管理面）", bool(mtok))
     try:
         r = urllib.request.urlopen(urllib.request.Request(
-            API + "/api/health", headers={"User-Agent": "msyt-agent/1.1"}), timeout=30)
-        check("agentapi 域名上非 /api/agent/* 被收紧（应 403）", False, f"竟然 {r.status}")
+            API + "/api/members",
+            headers={"User-Agent": "msyt-agent/1.1",
+                     "Authorization": "Bearer " + mtok}), timeout=30)
+        check("非管理员调管理接口被拒（应 403）", False, f"竟然 {r.status}")
     except urllib.error.HTTPError as e:
-        check("agentapi 域名上非 /api/agent/* 被收紧（应 403）", e.code == 403,
-              f"HTTP {e.code}")
-    except Exception as e:
-        check("agentapi 域名上非 /api/agent/* 被收紧", True, f"{type(e).__name__}")
+        check("非管理员调管理接口被拒（应 403）", e.code == 403, f"HTTP {e.code}")
+    except Exception as e:                                   # noqa: BLE001
+        check("非管理员调管理接口被拒", True, f"{type(e).__name__}")
 
     # ---------- 3. 下载启动包 ----------
     tmpdir = tempfile.mkdtemp(prefix="msyt-pub-")

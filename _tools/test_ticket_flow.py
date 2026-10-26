@@ -29,7 +29,8 @@ PROG = os.path.join(ROOT, "程序")
 sys.path.insert(0, PROG)
 
 LOCAL = "http://127.0.0.1:8765"
-API = "https://agentapi.example.com"
+# ★ 地址**探测**而不是写死（2026-10-26）
+from net_probe import AGENT_API as API  # noqa: E402
 ADMIN = ("qa-admin@example.com", "qa-test-password")
 results = []
 

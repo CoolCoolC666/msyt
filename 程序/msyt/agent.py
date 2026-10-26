@@ -161,6 +161,12 @@ class Agent:
         #:   里面带**两个**候选地址：主用 + 备用。
         #:   启动时先探主地址，探不通就换备用 —— 包不必重新下载。
         self.server_alt = (server_alt or "").rstrip("/")
+        #: ★ 从服务端拉到的**实时地址池**（2026-10-26 加）：
+        #:   公网入口是隧道地址，隧道一重启地址就变
+        #:   （quick tunnel 每次给一个随机 `*.trycloudflare.com`）。
+        #:   只要还剩一条隧道活着，agent 就能从它那里把新地址捞回来，
+        #:   自己接上 —— 组员不必重下启动包。
+        self._alt_list: List[str] = []
         #: ★ 手动指定的代理（""= 自动读系统代理，None=已试过且没有）
         self.proxy = proxy.strip() if proxy else ""
         self._proxy: Optional[str] = None if proxy else None
@@ -397,6 +403,100 @@ class Agent:
                        "（双击「启动助手.cmd」）")
         return out
 
+    # ------------------------------------------------------------------
+    # 备用地址池（2026-10-26 加）
+    # ------------------------------------------------------------------
+    def _alt_file_lines(self) -> List[str]:
+        """读 `server-alt.txt` 里的备用地址（**每行一个**）。
+
+        ★ 为什么读文件、而不是写死在 `.cmd` 里：
+          公网入口是**隧道地址**，隧道一重启地址就变
+          （quick tunnel 每次给一个随机的 `*.trycloudflare.com`）。
+          写死在 `.cmd` 里 = 组员每次都要重下包；
+          放文件里 = 管理员改一行、组员重启 agent 即可。
+
+        ★ 路径**探测**而不是写死（环境变量 → 包目录 → 当前目录）。
+        """
+        cands: List[Path] = []
+        env = os.environ.get("MSYT_SERVER_ALT_FILE")
+        if env:
+            cands.append(Path(env))
+        try:
+            cands.append(Path(__file__).resolve().parent.parent / "server-alt.txt")
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            cands.append(Path.cwd() / "server-alt.txt")
+        except Exception:                                    # noqa: BLE001
+            pass
+        out: List[str] = []
+        for p in cands:
+            try:
+                if not p.is_file():
+                    continue
+                for line in p.read_text(encoding="utf-8",
+                                        errors="replace").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line not in out:
+                        out.append(line)
+            except Exception:                                # noqa: BLE001
+                continue
+        return out
+
+    def _alt_candidates(self) -> List[str]:
+        """备用控制面地址候选（去重、保序）。
+
+        顺序：命令行给的 `--server-alt` → 服务端拉的实时地址池
+        → `server-alt.txt` 里的行。
+        """
+        out: List[str] = []
+
+        def add(u: str) -> None:
+            # ★ 按行拆：万一来的是多行（文件里写了几个地址），
+            #   也不能被当成一个「带换行的 URL」。
+            for one in (u or "").splitlines():
+                one = one.strip().rstrip("/")
+                if one and one not in out:
+                    out.append(one)
+
+        add(self.server_alt)
+        for u in self._alt_list:
+            add(u)
+        for u in self._alt_file_lines():
+            add(u)
+        return out
+
+    def _refresh_endpoints(self, base: str) -> None:
+        """从一个**还活着**的入口拉当前可用地址列表，合并进地址池。
+
+        ★ 为什么需要：
+          隧道重启换地址后，组员手里的旧地址会全失效。
+          只要还剩一条隧道活着，agent 就能从它那里把新地址捞回来、
+          自己接上 —— 不用挨个通知组员重下包。
+
+        ★ 只读、失败不报错（拉不到就当没有）。
+        """
+        try:
+            import requests
+            r = requests.get(base + "/api/agent/endpoints", timeout=PROBE_TIMEOUT,
+                             headers={"User-Agent": "msyt-agent/1.1"})
+            if r.status_code >= 400:
+                return
+            eps = (r.json() or {}).get("endpoints") or []
+            new = 0
+            for u in eps:
+                u = (u or "").strip().rstrip("/")
+                if u and u not in self._alt_list:
+                    self._alt_list.append(u)
+                    new += 1
+            if new:
+                self.log(f"  ↻ 服务端给了 {new} 个新地址，"
+                         f"地址池共 {len(self._alt_list)} 个")
+        except Exception:                                    # noqa: BLE001
+            pass
+
     def pick_server(self) -> str:
         """**探测**一下控制面地址，主地址不通就换备用的。
 
@@ -415,8 +515,9 @@ class Agent:
 
         ★ 不改失联计数：选址阶段的失败**不该**算「运行中失联」。
         """
-        cands = [s for s in (self.server, self.server_alt) if s]
+        cands = [self.server] + self._alt_candidates()
         if len(cands) <= 1:
+            self._refresh_endpoints(self.server)
             return self.server
         import requests
         self.log(f"探测控制面地址（共 {len(cands)} 个候选）…")
@@ -431,6 +532,8 @@ class Agent:
                     continue
                 # 401/403 也算「通」—— 那是「没带令牌」，不是「到不了」
                 self.log(f"  ✓ {base} 可达（HTTP {r.status_code}）")
+                # ★ 顺手把服务端的**实时地址池**拉回来（隧道换地址后自愈）
+                self._refresh_endpoints(base)
                 if i > 0:
                     self.log(f"  → 主地址不通，改用备用：{base}")
                     self.server = base
@@ -914,7 +1017,7 @@ class Agent:
             except KeyboardInterrupt:
                 self.log("  → 已取消等待")
                 return False
-            cands = [s for s in (self.server, self.server_alt) if s]
+            cands = [self.server] + self._alt_candidates()
             for base in cands:
                 if self._probe(base):
                     self.log(f"  ✓ 网络恢复了：{base}")

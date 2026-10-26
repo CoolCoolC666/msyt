@@ -145,6 +145,7 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                  helper_src: str = "",
                  cf_id: str = "", cf_secret: str = "",
                  server_alt: str = "",
+                 server_alt_all: str = "",
                  helper_port: int = 8766,
                  agent_workers: int = 0) -> Tuple[bytes, str]:
     """生成启动包。返回 (zip 字节, 文件名)。
@@ -316,8 +317,12 @@ def build_bundle(server: str, ticket: str, msyt_dir: str,
                    + "\n本机小助手端口：" + str(helper_port)
                    + "（网页也用这个端口呼叫它；想改就改 helper-port.txt）\n")
         z.writestr("server.txt", server + "\n")
-        if server_alt:
-            z.writestr("server-alt.txt", server_alt + "\n")
+        # ★ `server-alt.txt` 里可以是**多行**（2026-10-26）：
+        #   隧道守护维持多条隧道，每条一个地址 → agent 自己逐个探，
+        #   哪条通用哪条；隧道换地址后重新下包也不会只剩一条。
+        _alt_file = server_alt_all.strip() or (server_alt.strip() if server_alt else "")
+        if _alt_file:
+            z.writestr("server-alt.txt", _alt_file + "\n")
         # ★ 启动凭证：网站登录后签发的凭证，**绑定到下载者的账号**。
         #   30 天内有效、**可以反复用**（2026-10-23 改：
         #   原来是一次性票据，30 分钟过期、用一次作废 ——

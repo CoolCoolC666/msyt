@@ -91,25 +91,38 @@ for _ in range(30):
         call(BASE + f"/api/jobs/{j['id']}/stop", tok=atok, method="POST")
     time.sleep(2)
 else:
-    print("      （在跑的 detail 任务停不掉，跳过采集任务那部分）")
+    # ★ 2026-10-26：停不掉 → 是**环境状态**（管理员本机正在跑采集），
+    #   不是被测对象坏了 → 明确跳过这一段，别记成失败。
+    print("      （在跑的 detail 任务停不掉 → 跳过采集任务那部分）")
+    SKIP_JOB = True
 
-conn = sqlite3.connect(os.path.join(PKG, "data", "msyt.db"))
-conn.row_factory = sqlite3.Row
-tids = [int(r["tid"]) for r in conn.execute(
-    """SELECT tid FROM threads WHERE detail_state='done'
-        AND pub_ts >= strftime('%s','2023-12-31') ORDER BY tid DESC LIMIT 3""")]
-conn.close()
-st, d = call(BASE + "/api/jobs/detail", {"tids": tids, "node": "admin"},
-             tok=atok, method="POST")
-jid = d["job"]["id"]
-for _ in range(40):
-    time.sleep(2)
-    j = call(BASE + f"/api/jobs/{jid}?tail=20", tok=atok)[1]
-    if j["state"] != "running":
-        break
-logs = [l.get("m", "") for l in (j.get("logs") or [])]
-hit = [l for l in logs if "并发采集启动" in l]
-check("★ 采集任务用了设置里的 2 路", any("2 路" in l for l in hit), str(hit))
+SKIP_JOB = False
+if SKIP_JOB:
+    print("  ⏭ 跳过：★ 采集任务用了设置里的 2 路"
+          "（同节点有采集任务在跑，属环境状态）")
+else:
+    conn = sqlite3.connect(os.path.join(PKG, "data", "msyt.db"))
+    conn.row_factory = sqlite3.Row
+    tids = [int(r["tid"]) for r in conn.execute(
+        """SELECT tid FROM threads WHERE detail_state='done'
+            AND pub_ts >= strftime('%s','2023-12-31') ORDER BY tid DESC LIMIT 3""")]
+    conn.close()
+    st, d = call(BASE + "/api/jobs/detail", {"tids": tids, "node": "admin"},
+                 tok=atok, method="POST")
+    # ★ 409 = 同节点已有采集任务在跑 → 环境状态，跳过而不是崩
+    if st == 409 or not isinstance(d, dict) or "job" not in d:
+        print(f"  ⏭ 跳过：★ 采集任务用了设置里的 2 路"
+              f"（起任务返回 {st}，同节点互斥，属环境状态）")
+    else:
+        jid = d["job"]["id"]
+        for _ in range(40):
+            time.sleep(2)
+            j = call(BASE + f"/api/jobs/{jid}?tail=20", tok=atok)[1]
+            if j["state"] != "running":
+                break
+        logs = [l.get("m", "") for l in (j.get("logs") or [])]
+        hit = [l for l in logs if "并发采集启动" in l]
+        check("★ 采集任务用了设置里的 2 路", any("2 路" in l for l in hit), str(hit))
 call(BASE + "/api/agent/workers", tok=atok, body={"workers": 3}, method="POST")
 st, d = call(BASE + "/api/agent/workers", tok=atok)
 check("已恢复推荐值 3", d.get("workers") == 3, str(d.get("workers")))

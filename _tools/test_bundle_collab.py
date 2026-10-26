@@ -28,6 +28,12 @@ sys.path.insert(0, os.path.join(ROOT, "程序"))
 BASE = "http://127.0.0.1:8765"
 EMAIL, PW = "test@example.com", "test-password"
 
+# ★ 地址**探测**而不是写死（2026-10-26）：公网入口是隧道地址，会变
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from net_probe import current_agent_api, current_public  # noqa: E402
+API_BASE = current_agent_api()       # 当前部署的公网入口
+PUBLIC_HOST = current_public().split("//", 1)[-1].split("/", 1)[0]
+
 OK = 0
 FAIL = 0
 
@@ -103,23 +109,23 @@ print(f"   主用 = {p1['server']}")
 print(f"   备用 = {p1['alt'] or '(无)'}")
 check("★ 本地下载 → 主用是**本地地址**",
       p1["server"] == "http://127.0.0.1:8765", p1["server"])
-check("★ 本地下载 → 备用是 agentapi 子域名",
-      p1["alt"] == "https://agentapi.example.com", p1["alt"])
+check("★ 本地下载 → 备用是当前部署的公网入口",
+      p1["alt"] == API_BASE, p1["alt"])
 check("包里有 server-alt.txt", p1["has_alt_file"])
 check("启动采集.cmd 传了 --server-alt", "--server-alt" in p1["cmd"])
 check("启动助手.cmd 传了 --server-alt", "--server-alt" in p1["helper_cmd"])
 check("说明里写了主用/备用", "主用" in p1["readme"] and "备用" in p1["readme"])
 
 # ---------------------------------------------------------------- ② 公网访问
-print("\n② 从**公网浏览器**下载（Host: msyt.example.com）")
+print(f"\n② 从**公网浏览器**下载（Host: {PUBLIC_HOST}）")
 st, z2 = req("/api/agent/bundle.zip", token=tok, raw=True,
-             host="msyt.example.com")
+             host=PUBLIC_HOST)
 check("包能下载", st == 200, f"HTTP {st}")
 p2 = read_pkg(z2)
 print(f"   主用 = {p2['server']}")
 print(f"   备用 = {p2['alt'] or '(无)'}")
-check("★ 公网下载 → 主用是 **agentapi 子域名**（唯一能绕 Access 的）",
-      p2["server"] == "https://agentapi.example.com", p2["server"])
+check("★ 公网下载 → 主用是当前部署的公网入口",
+      p2["server"] == API_BASE, p2["server"])
 check("★ 公网下载 → 备用是访问地址", p2["alt"] != "", p2["alt"])
 
 # ---------------------------------------------------------------- ③ 差异

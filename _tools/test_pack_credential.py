@@ -27,7 +27,8 @@ import zipfile
 ROOT = r"【项目根】"
 DB = os.path.join(ROOT, "程序", "data", "msyt.db")
 BASE = "http://127.0.0.1:8765"
-AGENT_API = "https://agentapi.example.com"
+# ★ 地址**探测**而不是写死（2026-10-26）
+from net_probe import AGENT_API  # noqa: E402
 
 MEMBER = ("test@example.com", "test-password")
 

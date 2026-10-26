@@ -42,13 +42,21 @@ for fn in files:
     if m:
         n, ok, bad = int(m.group(1)), int(m.group(2)), int(m.group(3))
     else:
+        # ★ 兜底（2026-10-26 补）：各脚本的汇总行写法不统一
+        #   （「通过 18 / 失败 0」「结果：5 通过 / 0 失败」「全部通过」…），
+        #   正则认不出时旧逻辑一律 bad=1 → 回归报告里全是 0/0 的假 FAIL，
+        #   真正的回归问题反而被淹没。
         n = ok = 0
         rc = p.returncode if p is not None else -1
-        bad = 1
-        if "[FAIL]" in out:
-            bad = out.count("[FAIL]")
-            ok = out.count("[PASS]")
-            n = ok + bad
+        bad = out.count("[FAIL]")
+        ok = out.count("[OK ]") + out.count("[PASS]")
+        if bad == 0 and ok == 0:
+            # 连标记都没有：看正文是不是明说「全过」
+            if ("\u5168\u90e8\u901a\u8fc7" in out) or re.search(r"\u5931\u8d25\s*0", out):
+                ok, bad = 1, 0
+            else:
+                bad = 1
+        n = ok + bad
     total_n += n
     total_ok += ok
     total_fail += bad

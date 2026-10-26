@@ -101,9 +101,16 @@ time.sleep(3)
 
 st, d = call("/api/jobs/detail", body={"limit": 12, "node": "admin"},
              tok=tok, method="POST")
-if not isinstance(d, dict) or "job" not in d:
+if st == 409:
+    # ★ 2026-10-26：409 = 同节点已有采集任务在跑 → **环境状态**，
+    #   不是被测对象坏了 → 明确跳过这一段（规矩：环境不满足 → 跳过）。
+    print("  ⏭ 跳过：实跑那一段（本节点已有采集任务在跑，"
+          "服务端同节点互斥 → 409）")
+    print("      等那轮采集跑完再复跑本测试即可。")
+    d = None
+if d is not None and (not isinstance(d, dict) or "job" not in d):
     check("任务能起来", False, str(d)[:120])
-else:
+elif d is not None:
     jid = d["job"]["id"]
     for _ in range(120):
         time.sleep(2)
