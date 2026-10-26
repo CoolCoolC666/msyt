@@ -80,35 +80,37 @@ def main() -> int:
     #     （row 普通帖行 / stick 置顶帖行 / announce 站方公告区），
     #     来源是列表采集时顺带记下的。
     #   ★ 局限：该表只覆盖**采过第一页**的源；没采过的源不会排除（保守 → 可能仍选中）。
+    # ★★ 选样**只在这个源里做**（2026-10-26 修）：
+    #   原来是对**全库**（60 万帖）做 GROUP BY + 相关子查询 NOT EXISTS，
+    #   再对每个候选单独 COUNT 一次 —— 随库增大严重退化，
+    #   实测**静默卡到 600s 超时**（一个字符都不打印，看着像死锁）。
+    #   限定到单个源后走索引，秒级完成。
+    #   （选样为空 → 明确跳过，不算失败：这个源可能还没采完详情。）
     cand = conn.execute(
         "SELECT t.tid, t.replies, s.source FROM threads t "
         "JOIN thread_sources s ON s.tid=t.tid "
-        "WHERE COALESCE(t.detail_state,'pending')='done' AND t.replies >= 3 "
+        "WHERE s.source = ? "
+        "AND COALESCE(t.detail_state,'pending')='done' AND t.replies >= 3 "
         "AND NOT EXISTS (SELECT 1 FROM thread_list_forms f "
         "                WHERE f.tid=t.tid AND f.source=s.source "
         "                  AND f.kind='announce') "
-        "GROUP BY t.tid ORDER BY t.tid DESC").fetchall()
+        "ORDER BY t.tid DESC LIMIT 50", (SOURCE,)).fetchall()
     if not cand:
-        print("  （库里还没有采完详情的帖，跳过）")
+        print(f"  （源 {SOURCE} 里没有合适的样本 —— 跳过，不算失败）")
+        conn.close()
         return 0
-    # 优先挑源里帖子少的（重采便宜）
-    sizes = {}
-    for c in cand:
-        sizes[c["source"]] = conn.execute(
-            "SELECT COUNT(*) n FROM thread_sources WHERE source=?",
-            (c["source"],)).fetchone()["n"]
-    cand.sort(key=lambda c: sizes.get(c["source"], 999999))
     pick = cand[0]
-    SOURCE = pick["source"]
     tid = int(pick["tid"])
     old_rep = int(pick["replies"] or 0)
     dept_id = int(SOURCE.split(":")[1]) if SOURCE.startswith("dept:") else 0
     if not dept_id:
         print(f"  （源 {SOURCE} 不是 dept 源，跳过）")
+        conn.close()
         return 0
+    n_in_source = len(cand)
     # ② 人为把库里的「站方回复数」**改小** → 等价于站方后来多回了
     fake = max(0, old_rep - 3)
-    print(f"  目标 tid={tid}（源 {SOURCE}，{sizes.get(SOURCE)} 帖）")
+    print(f"  目标 tid={tid}（源 {SOURCE}，候选 {n_in_source} 个）")
     print(f"  库里回复数 {old_rep} → 人为改成 {fake}，"
           f"列表页真实值应约 {old_rep} → 差 {old_rep - fake} 条应被判为增量")
 
