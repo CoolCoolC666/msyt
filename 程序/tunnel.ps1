@@ -179,7 +179,7 @@ switch ($Action) {
   'status' {
     $items = Get-TunnelPids
     if ($items.Count -eq 0) {
-      Log '当前没有在跑的隧道（用「启动-隧道.cmd」拉起）'
+      Log '当前没有在跑的隧道（双击「程序\启动-隧道.cmd」拉起）'
     } else {
       foreach ($it in $items) {
         $alive = $null -ne (Get-Process -Id ([int]$it.pid) -ErrorAction SilentlyContinue)

@@ -385,6 +385,42 @@ agent 有后台心跳；连接连续失败达阈值（默认 3 次）即判定�
 > 和 Cloudflare Access 的邮箱策略是**两层**，加成员时两边都要加
 > （Access 那边目前是 `*@example.com` 放行，要收紧就改成具体邮箱列表）。
 
+### 6.3.1 公网入口现状：**quick tunnel 守护**（2026-10-26 起）
+
+上面那套**命名隧道**（`msyt..example.com`）在境内**已经连不上了** ——
+不是配置错，是该域名后缀被按 SNI 做了**国家级封锁**
+（同一边缘 IP 只换 SNI 就能复现；换出口 IP 依旧；`trycloudflare.com` 等
+Cloudflare 托管后缀放行）。所以**境内**现在走的是 **quick tunnel**：
+每次启动拿一个 `*.trycloudflare.com` 随机地址。
+
+**入口就两个文件，都在本目录（`程序\`）里**：
+
+| 双击 | 做什么 |
+|---|---|
+| `程序\启动-隧道.cmd` | 拉起 **2 条** quick tunnel 并**驻留守护**（窗口别关；`Ctrl+C` 停） |
+| `程序\停止-隧道.cmd` | 停掉全部 quick tunnel |
+
+守护脚本是 `程序\tunnel.ps1`（`start` / `stop` / `status` 三个动作）。
+两个 `.cmd` **纯 ASCII + CRLF**（`cmd.exe` 会把非 ASCII 字节解析坏），
+并且都**不需要** Python 包装 —— 因为 `%~dp0` 展开后 `tunnel.ps1` 就在同目录，
+cmd 文件里不必出现任何中文路径字面量。
+
+`tunnel.ps1` 做的事：
+
+- **强制空配置**（`--config <空文件>`）顶掉 `~/.cloudflared/config.yml`
+  —— 不顶掉的话隧道会「连上了却没挂 hostname」，边缘一律回 **404**
+- 掉线**自动重拉**，每条都**探活** `/api/health`
+- 启动前先探**后端 8765** 存活（源站没起，隧道通了也是 502）
+- 把当前地址写进 **3 处**：`data\agent-api-base.txt`（主地址）、
+  `data\agent-endpoints.json`（地址池，喂 `GET /api/agent/endpoints`）、
+  成员启动包的 `server-alt.txt`（**一行一个**）
+
+★ **地址会变**（隧道重启就换）：组员**重启一次 agent** 即可自愈 ——
+agent 的候选池 = 命令行备用 + `server-alt.txt` + 从服务端拉回的实时地址池。
+
+★ **管理约定**：**手动启停、不注册开机自启**；
+隧道守护必须跑在**看得见的窗口**里（别挂在会话托管的后台任务上）。
+
 ### 6.4 三个实现要点（改这个模块前先读）
 
 ### 分页漂移（"错位"）与三道防线
