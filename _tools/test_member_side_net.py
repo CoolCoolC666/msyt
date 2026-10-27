@@ -19,7 +19,7 @@ import io
 import os
 import sys
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 sys.path.insert(0, os.path.join(ROOT, "程序"))
 
 from msyt import agent as A                      # noqa: E402

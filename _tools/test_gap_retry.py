@@ -21,7 +21,7 @@ import shutil
 import sys
 import tempfile
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 sys.path.insert(0, os.path.join(ROOT, "程序"))
 
 from msyt.db import DB                          # noqa: E402

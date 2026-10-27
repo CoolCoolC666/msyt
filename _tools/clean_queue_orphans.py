@@ -31,7 +31,7 @@ import os
 import sqlite3
 import time
 
-ROOT = (r"【用户桌面】\14-网络舆情分析与监测-2.0"
+ROOT = (r"【用户桌面】\28.新学期-启动\14-网络舆情分析与监测-2.0"
         r"\2-作业\02 民生e网通")
 DB = os.path.join(ROOT, "程序", "data", "msyt.db")
 

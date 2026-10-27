@@ -27,7 +27,7 @@ import os
 import sqlite3
 import sys
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 DB = os.path.join(ROOT, "程序", "data", "msyt.db")
 THRESHOLD = 900000000
 

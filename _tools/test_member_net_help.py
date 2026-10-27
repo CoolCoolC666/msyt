@@ -21,7 +21,7 @@ import sys
 import threading
 import zipfile
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 PKG = os.path.join(ROOT, "程序")
 sys.path.insert(0, PKG)
 

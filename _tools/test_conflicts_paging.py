@@ -17,7 +17,7 @@ import sys
 import urllib.error
 import urllib.request
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 BASE = "http://127.0.0.1:8765"
 
 OK = 0

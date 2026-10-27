@@ -23,7 +23,7 @@ import os
 import re
 import sys
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 WEB = os.path.join(ROOT, "程序", "msyt", "web")
 CSS = os.path.join(WEB, "style.css")
 HTML = os.path.join(WEB, "index.html")

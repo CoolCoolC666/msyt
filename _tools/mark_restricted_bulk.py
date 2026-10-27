@@ -39,7 +39,7 @@ import sys
 import time
 
 PKG = os.path.join(
-    r"【用户桌面】",
+    r"【用户桌面】\28.新学期-启动",
     "14-网络舆情分析与监测-2.0", "2-作业", "02 民生e网通", "程序")
 sys.path.insert(0, PKG)
 from msyt.config import BASE, Config                # noqa: E402

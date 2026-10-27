@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 sys.path.insert(0, os.path.join(ROOT, "程序"))
 BASE = "http://127.0.0.1:8765"
 EMAIL, PW = "test@example.com", "test-password"

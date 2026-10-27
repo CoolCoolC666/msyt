@@ -1,0 +1,30 @@
+MIT License
+
+Copyright (c) 2026 CoolCoolC666
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+★ 关于这份 LICENSE 与站方数据的关系（重要，README 也有说明）
+  本 LICENSE 只覆盖**本仓库的源代码**。
+  它**不**授予对站方（bbs.cnnb.com.cn）任何内容的采集、转载或再发布权利 ——
+  站方明示「群众留言板」栏目内容未经授权不得擅自使用或转载，
+  需要授权请走站方的申请入口。
+  使用本程序采集数据的人，需要自行确认所在地法律与站方规定是否允许。

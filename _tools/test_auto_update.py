@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 # ★ 启动包位置**不写死**（2026-10-25：它从桌面搬到了 02 同级）
 from bundle_path import find_bundle
 PKG = find_bundle()

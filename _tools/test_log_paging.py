@@ -22,7 +22,7 @@ import os
 import re
 import sys
 
-ROOT = r"【项目根】"
+ROOT = r"os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
 PKG = os.path.join(ROOT, "程序")
 
 OK = 0
