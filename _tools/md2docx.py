@@ -93,7 +93,25 @@ def is_table_row(line: str) -> bool:
 
 
 def split_row(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    """★ 转义的竖线（`\\|`）是 markdown 表格里**写竖线的标准做法**（GFM）。
+
+    朴素实现 `split("|")` 会把 `a\\|b` 拆成两个单元格 →
+    单元格数超过表头列数时，多出来的那些会被
+    「`c >= len(header)` 就跳过」的逻辑**整段丢掉**（内容静默消失）。
+
+    2026-10-27 实测踩到：报告附录 B 有一行写了
+    `msyt\\|agentapi\\|example`，docx 里那一行后半段整个不见了
+    （md 与 docx 的中文字符数对不上，差 64 个字）。
+
+    → 改成：按**未被转义**的竖线切分，并把 `\\|` 还原成 `|`。
+    """
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|"):
+        body = body[:-1]
+    parts = re.split(r"(?<!\\)\|", body)
+    return [c.replace("\\|", "|").strip() for c in parts]
 
 
 def is_sep(line: str) -> bool:
