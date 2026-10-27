@@ -100,7 +100,7 @@ def split_row(line: str) -> list[str]:
     「`c >= len(header)` 就跳过」的逻辑**整段丢掉**（内容静默消失）。
 
     2026-10-27 实测踩到：报告附录 B 有一行写了
-    `msyt\\|agentapi\\|example`，docx 里那一行后半段整个不见了
+    `msyt\\|agentapi\\|自有标识`，docx 里那一行后半段整个不见了
     （md 与 docx 的中文字符数对不上，差 64 个字）。
 
     → 改成：按**未被转义**的竖线切分，并把 `\\|` 还原成 `|`。
