@@ -202,8 +202,11 @@ function detailBadge(s) {
               // stale = 站方又回复了，本地正文过时，等着重采
               'stale': 'warn',
               // restricted = 站方限制：历史帖子仅限作者本人查看，正文不公开
-              'restricted': 'warn' };
-  const label = { stale: '待更新', restricted: '站方限制' };
+              'restricted': 'warn',
+              // count_mismatch = 站方计数缺陷：列表称 N 楼、详情实测 M 楼
+              'count_mismatch': 'warn' };
+  const label = { stale: '待更新', restricted: '站方限制',
+                  count_mismatch: '站方计数缺陷' };
   return `<span class="badge ${m[s] || 'none'}">${esc(label[s] || s || '—')}</span>`;
 }
 
@@ -319,6 +322,8 @@ async function loadOverview() {
     ['已采详情帖', num(st.detail_done), '', '通过完整性判据'],
     ['站方限制帖', num(st.detail_restricted || 0), (st.detail_restricted ? 'warn' : ''),
       '站方不公开正文，已标记不计入已采'],
+    ['站方计数缺陷帖', num(st.detail_count_mismatch || 0), (st.detail_count_mismatch ? 'warn' : ''),
+      '正文已采全，但站方列表计数未随删楼而减'],
     ['待采队列', num(q.pending || 0), 'accent', '排在队列里等采'],
     ['失败待重试', num(q.failed || 0), (q.failed ? 'danger' : ''), '需要 retry'],
     ['部门数', num(st.depts), '', '站方部门目录'],
@@ -1443,20 +1448,74 @@ function pollJobs() {
 }
 
 /* ------------------------------------------------------------------ 体检 */
-/* 管理员专属页签。成员点不到（页签隐藏 + 接口 require_admin，两道都做）。 */
-let INT_PICKS = [];        // 体检结果里可勾选的帖子
+/* 管理员专属页签。成员点不到（页签隐藏 + 接口 require_admin，两道都做）。
+
+   ★★ 2026-10-28 大改：结果**分页 + 按需加载**。
+     原实现把整份体检结果（60 万帖量级）一次性 innerHTML 出去 ——
+     几十万行 <tr> 的 DOM + 几百 MB 的 JSON，两处一起把标签页撑爆。
+     现在三处改动：
+       ① 明细走 /api/integrity/page **按类分页**取，展开才加载第一页；
+       ② 勾选态从 DOM 搬到 Set（int_state.js）→ 翻页不丢勾选，
+          「全选本类」拿的是**该类全部** tid，不是当前页那 50 条；
+       ③ 摘要（各类条数）随结果一起给，不再从明细数组长度算。 */
+const INT = IntState.createState();
+
+/* 四类的表头与单元格取值（restricted 只有两列） */
+const INT_META = {
+  problems: {
+    title: '硬问题（要重跑或清除）',
+    cols: ['TID', '楼层', '页', '问题'],
+    cell: (p) => [p.tid, p.posts, p.pages, (p.problems || []).join('；')],
+    note: '',
+  },
+  growth: {
+    title: '已识别的增量（站方又回复了 / 少贴 → 已标记待重采）',
+    cols: ['TID', '本地楼层', '站方称', '说明'],
+    cell: (g) => [g.tid, g.posts, g.expect, g.reason],
+    note: '',
+  },
+  warnings: {
+    title: '软警告（站方计数问题 · 不算漏采）',
+    cols: ['TID', '本地楼层', '说明'],
+    cell: (w) => [w.tid, w.posts, (w.warnings || []).join('；')],
+    note: '软警告分两种：<b>楼层号中间缺</b>（站方删楼/置顶）—— 那楼已经不存在了，'
+        + '<b>补采也没用</b>，不自动重采；<b>站方称 N 楼而我们实收 M 楼、'
+        + '但楼层号连续</b>（尾部少）—— 那是站方还有楼我们没采到，'
+        + '<b>已按增量自动安排补采</b>，会出现在「已识别的增量」那一栏。',
+  },
+  restricted: {
+    title: '站方限制（正文不公开 · 已标记 · 不计入已采详情帖）',
+    cols: ['TID', '说明'],
+    cell: (g) => [g.tid, g.reason],
+    note: '这些帖的详情页在站方只给「提示信息」页（历史帖子仅限作者本人查看），'
+        + '属于<b>站方的可见性策略</b>，不是漏采 —— 重跑不会变，因此不提供勾选。',
+  },
+  count_mismatch: {
+    title: '站方计数缺陷（正文已采全 · 不计入已采详情帖）',
+    cols: ['TID', '本地楼层', '说明'],
+    cell: (m) => [m.tid, m.posts, m.reason],
+    note: '站方列表页说该帖有 N 楼，但<b>详情页实测只有 M 楼</b>（M ≤ 我们实收）—— '
+        + '说明差额来自<b>站方删楼后列表计数没跟着减</b>，不是我们漏采。'
+        + '正文其实已经采全了，重采多少次都不会变，因此不提供勾选。',
+  },
+};
+
 function intSelTids() {
-  return $$('#integrity-out input[data-tid]:checked').map(cb => +cb.dataset.tid);
+  return IntState.selectedTids(INT);
 }
 function intSelInfo() {
-  const n = intSelTids().length;
+  const n = INT.sel.size;
   const el = $('#int-sel-info');
   if (el) el.textContent = n ? `已选 ${n} 帖` : '';
 }
 function intSetSel(tids, on) {
-  const set = new Set(tids);
+  IntState.setSelected(INT, tids, on);
+  intSyncChecks();
+}
+/* 勾选态变了 → 把**当前渲染出来的** checkbox 状态同步回去 */
+function intSyncChecks() {
   $$('#integrity-out input[data-tid]').forEach(cb => {
-    if (set.has(+cb.dataset.tid)) cb.checked = !!on;
+    cb.checked = IntState.isSelected(INT, cb.dataset.tid);
   });
   intSelInfo();
 }
@@ -1470,6 +1529,24 @@ function showIntegrityIdle() {
     + '自动跑会把页面卡住，所以改成<b>手动触发</b>。<br>'
     + '点上面的「<b>开始体检</b>」按钮即可 —— 体检跑在后台，'
     + '页面不会卡死，跑完自动出结果。</p>';
+  // ★ 上一次体检的结果还在库里（明细落库，不是一次性 payload）→
+  //   可以在**不重新扫全库**的前提下翻看上次结果。
+  api('/api/integrity/summary').then(d => {
+    const run = d && d.run;
+    if (!run || !run.run_id) return;
+    const box = $('#integrity-out');
+    if (!box || box.dataset.state === 'done') return;
+    const btn = document.createElement('button');
+    btn.className = 'ghost';
+    btn.textContent = '查看上次体检结果';
+    btn.onclick = () => intRenderShell(run, { last: true });
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.innerHTML = `上次体检：${run.created_at || ''} · 检查 ${run.checked} 帖 · `
+      + `问题 ${(run.counts || {}).problems || 0} 条　`;
+    p.appendChild(btn);
+    box.appendChild(p);
+  }).catch(() => {});
 }
 
 /* 手动触发：起一个后台体检任务，然后轮询到结束再渲染。
@@ -1496,8 +1573,9 @@ async function runIntegrity() {
       throw new Error('体检还没跑完（可能耗时较长），过一会儿再点一次看看');
     }
     if (j.state === 'failed') throw new Error(j.error || '体检失败');
+    // ★ job.result 现在**只有摘要**（明细在库里，按类分页取）
     const r = j.result || {};
-    await renderIntegrity(r, out);
+    intRenderShell(r, {});
   } catch (e) {
     out.dataset.state = 'idle';
     out.innerHTML = `<div class="errbox">体检失败：${esc(e.message)}</div>`;
@@ -1506,130 +1584,260 @@ async function runIntegrity() {
   }
 }
 
-async function renderIntegrity(r, out) {
-  {
-    let lc = { items: [], counts: {} };
-    try { lc = await api('/api/list-changes?limit=200'); } catch (e) { /* 留痕表可能还没建 */ }
-    let html = `<div class="okbox">检查 ${r.checked} 帖 · 通过 ${r.ok} 帖 · 问题 ${r.problems.length} 条`
-      + ` · 软警告 ${r.warnings.length} 条 · 已识别增量 ${(r.growth || []).length} 条`
-      + ` · 站方限制 ${(r.restricted || []).length} 条</div>`;
-
-    const row = (tid, posts, pages, extra) =>
-      `<tr><td><input type="checkbox" data-tid="${tid}"></td>`
-      + `<td class="num">${tid}</td><td class="num">${posts ?? '—'}</td>`
-      + (pages === null ? '' : `<td class="num">${pages ?? '—'}</td>`)
-      + `<td>${extra}</td></tr>`;
-
-    if (r.problems.length) {
-      html += '<h4 style="margin:14px 0 6px">硬问题（要重跑或清除）</h4>'
-        + '<div class="tablewrap"><table><thead><tr><th></th><th>TID</th><th>楼层</th>'
-        + '<th>页</th><th>问题</th></tr></thead><tbody>'
-        + r.problems.map(p => row(p.tid, p.posts, p.pages,
-            esc(p.problems.join('；')))).join('')
-        + '</tbody></table></div>';
-    }
-    if ((r.growth || []).length) {
-      html += '<h4 style="margin:14px 0 6px">已识别的增量（站方又回复了 / 少贴 → 已标记待重采）</h4>'
-        + '<div class="tablewrap"><table><thead><tr><th></th><th>TID</th><th>本地楼层</th>'
-        + '<th>站方称</th><th>说明</th></tr></thead><tbody>'
-        + r.growth.map(g => row(g.tid, g.posts, g.expect,
-            esc(g.reason))).join('')
-        + '</tbody></table></div>';
-    }
-    if (r.warnings.length) {
-      html += '<h4 style="margin:14px 0 6px">软警告（站方计数问题 · 不算漏采）</h4>'
-        + '<div class="tablewrap"><table><thead><tr><th></th><th>TID</th><th>本地楼层</th>'
-        + '<th>说明</th></tr></thead><tbody>'
-        + r.warnings.map(w => row(w.tid, w.posts, null,
-            esc((w.warnings || []).join('；')))).join('')
-        + '</tbody></table></div>'
-        + '<p class="hint">软警告分两种：<b>楼层号中间缺</b>（站方删楼/置顶）——'
-        + '那楼已经不存在了，<b>补采也没用</b>，不自动重采；'
-        + '<b>站方称 N 楼而我们实收 M 楼、但楼层号连续</b>（尾部少）——'
-        + '那是站方还有楼我们没采到，<b>已按增量自动安排补采</b>，会出现在上面那一栏。'
-        + '</p>';
-    }
-    if ((r.restricted || []).length) {
-      // ★ 站方限制：**不能勾选重跑/清除** —— 重跑多少次都是同一个提示页，
-      //   勾了只会让成员白跑。单独列出来，让人知道这些帖为什么采不到。
-      html += '<h4 style="margin:14px 0 6px">站方限制（正文不公开 · 已标记 · 不计入已采详情帖）</h4>'
-        + '<div class="tablewrap"><table><thead><tr><th>TID</th><th>说明</th>'
-        + '</tr></thead><tbody>'
-        + r.restricted.map(g =>
-          `<tr><td class="num">${g.tid}</td><td>${esc(g.reason || '')}</td></tr>`).join('')
-        + '</tbody></table></div>'
-        + '<p class="hint">这些帖的详情页在站方只给「提示信息」页（历史帖子仅限作者本人查看），'
-        + '属于<b>站方的可见性策略</b>，不是漏采 —— 重跑不会变，因此不提供勾选。</p>';
-    }
-    if ((lc.items || []).length) {
-      // ★ 列表阶段的变更留痕：站方什么时候受理的、什么时候回的、标题改没改
-      const KIND = {
-        new: '新帖', state: '受理状态变了', replies: '回复数变了', title: '标题改了',
-      };
-      // 说明写短一点（表头已有解释），别把列挤成竖排
-      const WHY = {
-        new: '首次出现', state: '受理流程随之变化，详情待重采',
-        replies: '站方追加了楼层', title: '站方改了标题',
-      };
-      const rows = (lc.items || []).slice(0, 80).map(x => `<tr>
-        <td class="sub2 nowrap">${esc(x.ts || '')}</td>
-        <td class="sub2 nowrap">${esc(x.source || '')}</td>
-        <td class="num nowrap">${esc(x.tid)}</td>
-        <td class="nowrap">${esc(KIND[x.kind] || x.kind || '')}</td>
-        <td class="sub2">${esc((x.old_val || '空').slice(0, 22))}</td>
-        <td class="sub2">${esc((x.new_val || '空').slice(0, 22))}</td>
-        <td class="sub2">${esc(WHY[x.kind] || '')}</td>
-      </tr>`).join('');
-      const c = lc.counts || {};
-      html += '<h4 style="margin:14px 0 6px">列表阶段的变化（站方动过哪些帖）</h4>'
-        + '<p class="hint">列表采集是<b>覆盖式</b>写入的 —— 旧值一被盖掉就再也查不到了。'
-        + '这张表把「覆盖前那一瞬间」存下来，于是能回答：'
-        + '这帖站方<b>什么时候受理的</b>、标题什么时候改的、这一趟多出了哪些新帖。<br>'
-        + `当前留痕：新帖 ${c.new || 0} · 受理状态变了 ${c.state || 0} · `
-        + `回复数变了 ${c.replies || 0} · 标题改了 ${c.title || 0}`
-        + '</p>'
-        + '<div class="tablewrap wide"><table><thead><tr><th>时间</th><th>采集源</th><th>TID</th>'
-        + '<th>变化</th><th>旧值</th><th>新值</th><th>说明</th></tr></thead><tbody>'
-        + rows + '</tbody></table></div>';
-    }
-    if (!r.problems.length && !r.warnings.length && !(r.growth || []).length
-        && !(r.restricted || []).length && !(lc.items || []).length) {
-      html += '<div class="okbox">全部干净。</div>';
-    }
-    out.innerHTML = html;
-    out.dataset.state = 'done';
-    $$('#integrity-out input[data-tid]').forEach(cb => {
-      cb.onchange = intSelInfo;
+/* ---------------------------------------------------------------- 体检渲染 */
+/* 摘要 + 四个**各自独立**的折叠块（展开才加载第一页）。
+   ★ 明细不再一次性铺进 DOM —— 几十万行 <tr> 会把标签页撑爆。 */
+function intRenderShell(r, opt) {
+  const out = $('#integrity-out');
+  if (!out) return;
+  INT.run = r || null;
+  INT.sel.clear();
+  INT.all = {}; INT.page = {}; INT.size = {}; INT.loaded = {};
+  const counts = (INT.run && INT.run.counts) || {};
+  const c = k => counts[k] || 0;
+  const checked = (INT.run && INT.run.checked) || 0;
+  const ok = (INT.run && INT.run.ok) || 0;
+  let html = `<div class="okbox">检查 ${checked} 帖 · 通过 ${ok} 帖`
+    + ` · 问题 ${c('problems')} 条 · 软警告 ${c('warnings')} 条`
+    + ` · 已识别增量 ${c('growth')} 条 · 站方限制 ${c('restricted')} 条`
+    + ` · 站方计数缺陷 ${c('count_mismatch')} 条`
+    + (opt && opt.last
+        ? '<br><span class="hint">（这是<b>上次</b>体检的结果；'
+          + '要重新体检请点「开始体检」）</span>' : '')
+    + '</div>';
+  html += `<p class="hint">下面${IntState.KINDS.length}类<b>各自独立</b>：点标题展开才加载明细，`
+    + '每类单独翻页；<b>勾选状态跨页保持</b>，'
+    + '「全选本类」选中的是<b>该类全部</b>条目（不是当前页那几十条）。</p>';
+  IntState.KINDS.forEach(kind => {
+    const m = INT_META[kind];
+    const n = c(kind);
+    // ★ 是否可勾选一律看 IntState.SELECTABLE（唯一真值来源），
+    //   不可勾选的原因文案按类别给（restricted 是「采不到」，
+    //   count_mismatch 是「采到了但对不上账」）。
+    const selectable = IntState.SELECTABLE.indexOf(kind) >= 0;
+    const noPickWhy = (kind === 'count_mismatch')
+      ? '（正文已采全，重跑多少次都不会变）'
+      : '（重跑多少次都是同一个提示页）';
+    html += `<details class="int-sec" id="int-sec-${kind}" data-int-kind="${kind}">`
+      + `<summary><b>${m.title}</b> <span class="hint">${n} 条</span></summary>`
+      + '<div class="row" style="margin:8px 0 4px">'
+      + (selectable
+          ? `<button class="ghost" data-int-selkind="${kind}">`
+            + `全选本类（${n}）</button>`
+          : `<span class="hint">这一类<b>不可勾选</b>${noPickWhy}</span>`)
+      + '</div>'
+      + intTableHtml(kind)
+      + `<div id="int-pagerbar-${kind}"></div>`
+      + (m.note ? `<p class="hint">${m.note}</p>` : '')
+      + '</details>';
+  });
+  html += '<div id="int-lc"></div>';
+  out.innerHTML = html;
+  out.dataset.state = 'done';
+  IntState.KINDS.forEach(kind => intRenderPager(kind));
+  $$('#integrity-out details[data-int-kind]').forEach(det => {
+    det.addEventListener('toggle', () => {
+      if (det.open) intLoadPage(det.dataset.intKind, 1);
     });
-    intSelInfo();
-    INT_PICKS = {
-      problems: r.problems.map(p => p.tid),
-      growth: (r.growth || []).map(g => g.tid),
-      warnings: r.warnings.map(w => w.tid),
-    };
+  });
+  intSelInfo();
+  intLoadListChanges();
+}
+
+function intTableHtml(kind) {
+  const m = INT_META[kind];
+  // ★ 是否画勾选列，一律看 IntState.SELECTABLE（唯一真值来源）。
+  //   旧写法硬编码 `kind === 'restricted'` → 新增类别（count_mismatch）
+  //   会被误画成可勾选 → 勾了只会让成员白跑（它重采多少次都不会变）。
+  const sel = IntState.SELECTABLE.indexOf(kind) >= 0;
+  const head = (sel ? '<th></th>' : '')
+    + m.cols.map(c => `<th>${c}</th>`).join('');
+  const span = m.cols.length + (sel ? 1 : 0);
+  return '<div class="tablewrap"><table><thead><tr>' + head + '</tr></thead>'
+    + `<tbody id="int-body-${kind}"><tr><td colspan="${span}" class="hint">`
+    + '展开后加载…</td></tr></tbody></table></div>';
+}
+
+function intRowHtml(kind, it) {
+  const m = INT_META[kind];
+  const cells = m.cell(it);
+  // ★ 同上：勾选列只看 IntState.SELECTABLE，不硬编码类别名
+  const cb = (IntState.SELECTABLE.indexOf(kind) >= 0)
+    ? `<td><input type="checkbox" data-tid="${it.tid}"></td>` : '';
+  const tds = cells.map((v, i) => {
+    const isnum = (i === 0 || typeof v === 'number');
+    const txt = (v === null || v === undefined || v === '') ? '—' : String(v);
+    return `<td${isnum ? ' class="num"' : ''}>${esc(txt)}</td>`;
+  }).join('');
+  return `<tr>${cb}${tds}</tr>`;
+}
+
+/* 拉某一类的第 N 页 → 只替换这一类的 tbody（不动其他三块） */
+async function intLoadPage(kind, page) {
+  const body = $('#int-body-' + kind);
+  if (!body) return;
+  const size = INT.size[kind] || 50;
+  const span = INT_META[kind].cols.length
+    + (IntState.SELECTABLE.indexOf(kind) >= 0 ? 1 : 0);
+  body.innerHTML = `<tr><td colspan="${span}" class="hint">加载中…</td></tr>`;
+  try {
+    const d = await api('/api/integrity/page?kind=' + encodeURIComponent(kind)
+      + '&page=' + page + '&page_size=' + size);
+    INT.page[kind] = { page: d.page, pages: d.pages, total: d.total };
+    INT.loaded[kind] = true;
+    const items = d.items || [];
+    body.innerHTML = items.length
+      ? items.map(it => intRowHtml(kind, it)).join('')
+      : `<tr><td colspan="${span}" class="hint">这一类没有条目</td></tr>`;
+    intRenderPager(kind);
+    intSyncChecks();          // ★ 翻页后把勾选态回填到新渲染的 checkbox
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="${span}" class="errbox">`
+      + `加载失败：${esc(e.message)}</td></tr>`;
   }
 }
+
+function intRenderPager(kind) {
+  const bar = $('#int-pagerbar-' + kind);
+  if (!bar) return;
+  const p = INT.page[kind] || { page: 1, pages: 0, total: 0 };
+  const pages = Math.max(1, p.pages || 0);
+  const size = INT.size[kind] || 50;
+  bar.innerHTML = '<div class="row int-pagerbar">'
+    + `<button class="ghost" data-int-pg="${kind}" data-int-pgto="first"`
+    + (p.page <= 1 ? ' disabled' : '') + '>«</button>'
+    + `<button class="ghost" data-int-pg="${kind}" data-int-pgto="prev"`
+    + (p.page <= 1 ? ' disabled' : '') + '>‹</button>'
+    + `<span class="hint">第 ${p.page} / ${pages} 页 · 共 ${p.total} 条</span>`
+    + `<button class="ghost" data-int-pg="${kind}" data-int-pgto="next"`
+    + (p.page >= pages ? ' disabled' : '') + '>›</button>'
+    + `<button class="ghost" data-int-pg="${kind}" data-int-pgto="last"`
+    + (p.page >= pages ? ' disabled' : '') + '>»</button>'
+    + `<select data-int-size="${kind}">`
+    + [20, 50, 100].map(n => `<option value="${n}"`
+        + (n === size ? ' selected' : '') + `>每页 ${n}</option>`).join('')
+    + '</select></div>';
+}
+
+/* 取某一类的**全部** tid（只回数字数组，比拉全量明细轻两个数量级） */
+async function intLoadTids(kind) {
+  if (INT.all[kind]) return INT.all[kind];
+  const d = await api('/api/integrity/tids?kind=' + encodeURIComponent(kind));
+  INT.all[kind] = d.tids || [];
+  return INT.all[kind];
+}
+
+async function intToggleKind(kind) {
+  try {
+    const tids = await intLoadTids(kind);
+    if (!tids.length) {
+      toast('这一类没有条目', true);
+      return;
+    }
+    const r = IntState.toggleAll(INT, kind, tids);
+    intSyncChecks();
+    toast(r.on ? `已全选该类 ${r.n} 条` : '已取消该类选择');
+  } catch (e) { toast(e.message, true); }
+}
+
+/* 「全选（全部可勾选的）」= 三类**并集**；已全选则取消 */
+async function intToggleAllKinds() {
+  try {
+    const all = [];
+    for (const k of IntState.SELECTABLE) {
+      all.push(...(await intLoadTids(k)));
+    }
+    if (!all.length) {
+      toast('当前没有可勾选的帖子（问题 / 增量 / 软警告都是空的）', true);
+      return;
+    }
+    const allOn = all.every(t => INT.sel.has(t));
+    IntState.setSelected(INT, all, !allOn);
+    intSyncChecks();
+    toast(allOn ? '已取消全选' : `已全选 ${all.length} 帖（问题 + 增量 + 软警告）`);
+  } catch (e) { toast(e.message, true); }
+}
+
+/* 列表阶段的变化（留痕表）—— 已有 slice(0,80) 截断，不是内存元凶 */
+async function intLoadListChanges() {
+  const box = $('#int-lc');
+  if (!box) return;
+  let lc = { items: [], counts: {} };
+  try { lc = await api('/api/list-changes?limit=200'); } catch (e) { /* 留痕表可能还没建 */ }
+  if (!(lc.items || []).length) { box.innerHTML = ''; return; }
+  const KIND = {
+    new: '新帖', state: '受理状态变了', replies: '回复数变了', title: '标题改了',
+  };
+  const WHY = {
+    new: '首次出现', state: '受理流程随之变化，详情待重采',
+    replies: '站方追加了楼层', title: '站方改了标题',
+  };
+  const rows = (lc.items || []).slice(0, 80).map(x => `<tr>
+    <td class="sub2 nowrap">${esc(x.ts || '')}</td>
+    <td class="sub2 nowrap">${esc(x.source || '')}</td>
+    <td class="num nowrap">${esc(x.tid)}</td>
+    <td class="nowrap">${esc(KIND[x.kind] || x.kind || '')}</td>
+    <td class="sub2">${esc((x.old_val || '空').slice(0, 22))}</td>
+    <td class="sub2">${esc((x.new_val || '空').slice(0, 22))}</td>
+    <td class="sub2">${esc(WHY[x.kind] || '')}</td>
+  </tr>`).join('');
+  const c = lc.counts || {};
+  box.innerHTML = '<h4 style="margin:14px 0 6px">列表阶段的变化（站方动过哪些帖）</h4>'
+    + '<p class="hint">列表采集是<b>覆盖式</b>写入的 —— 旧值一被盖掉就再也查不到了。'
+    + '这张表把「覆盖前那一瞬间」存下来，于是能回答：'
+    + '这帖站方<b>什么时候受理的</b>、标题什么时候改的、这一趟多出了哪些新帖。<br>'
+    + `当前留痕：新帖 ${c.new || 0} · 受理状态变了 ${c.state || 0} · `
+    + `回复数变了 ${c.replies || 0} · 标题改了 ${c.title || 0}`
+    + '</p>'
+    + '<div class="tablewrap wide"><table><thead><tr><th>时间</th><th>采集源</th>'
+    + '<th>TID</th><th>变化</th><th>旧值</th><th>新值</th><th>说明</th></tr></thead>'
+    + `<tbody>${rows}</tbody></table></div>`;
+}
+
 $('#btn-integrity').onclick = runIntegrity;
 
-$('#btn-int-sel-problem').onclick = () => { intSetSel(INT_PICKS.problems || [], true); };
-$('#btn-int-sel-growth').onclick = () => { intSetSel(INT_PICKS.growth || [], true); };
-$('#btn-int-sel-warn').onclick = () => { intSetSel(INT_PICKS.warnings || [], true); };
-$('#btn-int-sel-all').onclick = () => {
-  const all = $$('#integrity-out input[data-tid]');
-  if (!all.length) {
-    // ★ 之前这里什么都不做 → 点了像坏了。现在给明确提示。
-    toast('当前没有可勾选的帖子（问题 / 增量 / 软警告都是空的）', true);
+/* ★ 「全选本类」＝ 选中该类**全部**条目（分页前的旧实现只能选到
+   当前渲染出来的那几十条 → 全选语义是塌的）。
+   现在从 /api/integrity/tids 拿该类的全部 tid（只回数字数组）。 */
+$('#btn-int-sel-problem').onclick = () => intToggleKind('problems');
+$('#btn-int-sel-growth').onclick = () => intToggleKind('growth');
+$('#btn-int-sel-warn').onclick = () => intToggleKind('warnings');
+$('#btn-int-sel-all').onclick = () => intToggleAllKinds();
+$('#btn-int-clear-sel').onclick = () => {
+  IntState.clear(INT);
+  intSyncChecks();
+};
+
+/* 体检结果区的事件委托（内容会被整体替换，委托在容器上才活得下来） */
+$('#integrity-out').addEventListener('click', ev => {
+  const sk = ev.target.closest('[data-int-selkind]');
+  if (sk) { intToggleKind(sk.dataset.intSelkind); return; }
+  const pg = ev.target.closest('[data-int-pg]');
+  if (!pg) return;
+  const kind = pg.dataset.intPg;
+  const p = INT.page[kind] || { page: 1, pages: 0 };
+  const to = pg.dataset.intPgto;
+  let target = p.page;
+  if (to === 'first') target = 1;
+  else if (to === 'prev') target = Math.max(1, p.page - 1);
+  else if (to === 'next') target = p.page + 1;
+  else if (to === 'last') target = Math.max(1, p.pages || 1);
+  intLoadPage(kind, target);
+});
+$('#integrity-out').addEventListener('change', ev => {
+  const cb = ev.target.closest('input[data-tid]');
+  if (cb) {
+    IntState.setSelected(INT, [cb.dataset.tid], cb.checked);
+    intSelInfo();
     return;
   }
-  const allOn = all.every(cb => cb.checked);
-  all.forEach(cb => { cb.checked = !allOn; });
-  intSelInfo();
-  toast(allOn ? '已取消全选' : `已全选 ${all.length} 帖`);
-};
-$('#btn-int-clear-sel').onclick = () => {
-  $$('#integrity-out input[data-tid]').forEach(cb => { cb.checked = false; });
-  intSelInfo();
-};
+  const sz = ev.target.closest('select[data-int-size]');
+  if (sz) {
+    const kind = sz.dataset.intSize;
+    INT.size[kind] = +sz.value || 50;
+    intLoadPage(kind, 1);
+  }
+});
 
 $('#btn-int-retry').onclick = async () => {
   const tids = intSelTids();

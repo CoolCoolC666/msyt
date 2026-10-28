@@ -599,3 +599,17 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); }
   font-size: 11.5px; white-space: nowrap;
 }
 .node-chip b { color: var(--accent); font-weight: 700; }
+
+/* 体检分页改造（2026-10-28）：四类各自独立的折叠块 + 独立分页器 */
+#integrity-out details.int-sec {
+  margin: 10px 0; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; background: #fcfdfe;
+}
+#integrity-out details.int-sec > summary {
+  cursor: pointer; font-size: 13.5px; padding: 2px 0; user-select: none;
+}
+#integrity-out details.int-sec > summary:hover { color: var(--accent); }
+#integrity-out details.int-sec[open] > summary { margin-bottom: 4px; }
+#integrity-out .int-pagerbar { margin: 6px 0 2px; gap: 6px; align-items: center; }
+#integrity-out .int-pagerbar select { padding: 2px 4px; font-size: 12px; }
+#integrity-out .int-pagerbar button { padding: 3px 9px; }

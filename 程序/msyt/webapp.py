@@ -606,7 +606,7 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
       被当成「还没采详情」全筛进来（实测筛出 584,587 帖）→
       这些帖**永远采不到**（站方只给提示页），却排在队首 →
       worker 一上来就撞上它们 → 白烧产能、界面看着像「如跑」。
-      → 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`。
+      → 口径与 `/api/pending` 一致：`NOT IN ('done','restricted','count_mismatch')`。
       （`stale` = 待重采，仍要入选 —— 它确实还要采。）
     """
     ids = [str(x) for x in (dept_ids or []) if str(x).strip()]
@@ -620,7 +620,7 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
         params.append(f",{i},")
     rows = db.conn.execute(
         "SELECT tid FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted') "
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch') "
         f"AND ({' OR '.join(parts)}) "
         "ORDER BY COALESCE(pub_ts,0) ASC, tid ASC", params).fetchall()
     return [r["tid"] for r in rows]
@@ -777,7 +777,7 @@ def api_pending(request: Request,
     tids = _tids_for_depts(db, ids)
     total_pending = db.conn.execute(
         "SELECT COUNT(*) FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted')"
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch')"
     ).fetchone()[0]
     return {"dept_ids": ids, "pending": len(tids), "total_pending": total_pending,
             "sample": tids[:20]}
@@ -796,7 +796,7 @@ def api_pending_by_dept(request: Request) -> Dict[str, Any]:
       109 个部门发 109 次 → 接口刷屏、页面卡。
       → 一次查询 + 内存归组。
 
-    ★ 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`
+    ★ 口径与 `/api/pending` 一致：`NOT IN ('done','restricted','count_mismatch')`
       （restricted = 站方不公开正文，永远采不到，不该算进工作量）
     """
     _require_member(request)
@@ -804,7 +804,7 @@ def api_pending_by_dept(request: Request) -> Dict[str, Any]:
     db = get_db(cfg)
     rows = db.conn.execute(
         "SELECT dept_id, extra_dept_ids FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted')"
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch')"
     ).fetchall()
     counts: Dict[int, int] = {}
     for r in rows:
@@ -885,21 +885,103 @@ def api_integrity_run(request: Request) -> Dict[str, Any]:
         if j.get("kind") == "integrity" and j.get("state") == "running":
             raise HTTPException(409, "已有一个体检任务在跑，请等它跑完")
     cfg = _cfg()
+    run_id = uuid.uuid4().hex
     job = JOBS.create("integrity", {}, node="admin")
     job.log("开始体检：扫描全库详情帖…（全库量级，耗时较长）")
 
     def _run(j: Job) -> Dict[str, Any]:
         db = get_db(cfg)
         dc = DetailCollector(db, Client(cfg, verbose=False), cfg)
+        db.integrity_begin_run(run_id)
         j.log("扫描中…")
-        r = dc.integrity()
+        # ★★ 明细**逐条落库**，不在内存里堆（2026-10-28 内存爆的根因修复）
+        #   以前：整份结果塞进 job.result → 几百 MB → 前端一次性 innerHTML
+        #   → 标签页被撑爆。现在：分批写进 integrity_items，job.result 只留摘要。
+        buf: Dict[str, List] = {}
+        ords: Dict[str, int] = {}
+
+        def sink(kind: str, item: Dict[str, Any]) -> None:
+            n = ords.get(kind, 0) + 1
+            ords[kind] = n
+            buf.setdefault(kind, []).append(
+                (n, int(item.get("tid") or 0),
+                 json.dumps(item, ensure_ascii=False)))
+            if len(buf[kind]) >= 2000:        # 分批落库，内存不涨
+                db.integrity_add_items(run_id, kind, buf.pop(kind))
+
+        r = dc.integrity(sink=sink)
+        for kind, rows in list(buf.items()):
+            db.integrity_add_items(run_id, kind, rows)
+        counts = r.get("counts") or {}
+        db.integrity_finish_run(run_id, int(r.get("checked") or 0),
+                                int(r.get("ok") or 0), counts)
         j.log(f"体检完成：检查 {r.get('checked')} 帖，"
-              f"问题 {len(r.get('problems') or [])} 条，"
-              f"增量 {len(r.get('growth') or [])} 条")
-        return r
+              f"问题 {counts.get('problems', 0)} 条，"
+              f"增量 {counts.get('growth', 0)} 条")
+        # ★ 返回**摘要**：明细在库里，接口按类分页取
+        return {"run_id": run_id, "checked": int(r.get("checked") or 0),
+                "ok": int(r.get("ok") or 0), "counts": counts}
 
     JOBS.spawn(job, _run)
     return {"job": job.to_dict(tail=0)}
+
+
+@app.get("/api/integrity/summary")
+def api_integrity_summary(request: Request) -> Dict[str, Any]:
+    """最近一次体检的**摘要**（没有明细）。
+
+    ★ 为什么单独给一个摘要接口：
+      页面刷新后要能显示「上次体检：检查 N 帖 · 问题 X 条」，
+      而**不必**为了看个摘要把整份明细再拉一遍。
+    """
+    require_admin(request)
+    db = get_db(_cfg())
+    return {"run": db.integrity_latest_run()}
+
+
+@app.get("/api/integrity/page")
+def api_integrity_page(request: Request, kind: str = Query("problems"),
+                       page: int = Query(1, ge=1),
+                       page_size: int = Query(50, ge=1, le=200),
+                       run_id: str = "") -> Dict[str, Any]:
+    """按类取**一页**体检明细（内存与 DOM 都不爆的关键）。
+
+    ★ `kind` 走**白名单**校验：非法值直接 400，
+      不能拿它拼 SQL。
+    """
+    require_admin(request)
+    if kind not in DB.INTEGRITY_KINDS:
+        raise HTTPException(400, f"kind 只能是 {', '.join(DB.INTEGRITY_KINDS)}")
+    db = get_db(_cfg())
+    run = db.integrity_latest_run()
+    if not run:
+        return {"kind": kind, "total": 0, "page": page, "page_size": page_size,
+                "pages": 0, "items": [], "run_id": ""}
+    rid = run_id or run["run_id"]
+    out = db.integrity_page(rid, kind, page, page_size)
+    out["run_id"] = rid
+    return out
+
+
+@app.get("/api/integrity/tids")
+def api_integrity_tids(request: Request, kind: str = Query("problems"),
+                       run_id: str = "") -> Dict[str, Any]:
+    """只取某一类的**全部 tid**（只回数字数组）。
+
+    ★ 「全选」必须拿到该类**全部**的 tid，不能只拿当前页的 50 条 ——
+      否则「全选 1200 条」会退化成「全选当前页 50 条」（语义塌了）。
+      只回 tid 不回整行 → 比拉全量明细轻两个数量级。
+    """
+    require_admin(request)
+    if kind not in DB.INTEGRITY_KINDS:
+        raise HTTPException(400, f"kind 只能是 {', '.join(DB.INTEGRITY_KINDS)}")
+    db = get_db(_cfg())
+    run = db.integrity_latest_run()
+    if not run:
+        return {"kind": kind, "total": 0, "tids": [], "run_id": ""}
+    rid = run_id or run["run_id"]
+    tids = db.integrity_tids(rid, kind)
+    return {"kind": kind, "total": len(tids), "tids": tids, "run_id": rid}
 
 
 @app.post("/api/integrity/retry")
@@ -2480,7 +2562,10 @@ def index() -> Response:
     except OSError:
         return FileResponse(WEB_DIR / "index.html")
     html = (html.replace("__CSSV__", _asset_ver("style.css"))
-                .replace("__JSV__", _asset_ver("app.js")))
+                .replace("__JSV__", _asset_ver("app.js"))
+                # ★ int_state.js 用**自己**的版本号 —— 共用 app.js 的版本号会
+                #   出现「改了状态模块但浏览器还拿着旧的」这种缓存陷阱
+                .replace("__ISV__", _asset_ver("int_state.js")))
     return Response(content=html, media_type="text/html; charset=utf-8")
 
 
