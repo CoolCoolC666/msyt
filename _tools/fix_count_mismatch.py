@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +54,8 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="真正写库（默认只报告）")
     ap.add_argument("--limit", type=int, default=0, help="最多处理多少条（0=不限）")
     ap.add_argument("--delay", type=float, default=1.5, help="每帖间隔秒数")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="并发线程数（默认 1；3 路是采集链路的默认并发档）")
     ap.add_argument("--no-backup", action="store_true", help="跳过备份")
     args = ap.parse_args()
 
@@ -87,36 +90,87 @@ def main() -> int:
     #   中途中断就**全部白跑**，而且期间库里看不到任何进展。
     #   边跑边写 → 每批都是终态，中断也不损失已完成的批次。
     BATCH = 200
+    lock = threading.Lock()
 
     def flush():
+        """把攒下的 mismatch 写库。**只在主线程调用**（sqlite 连接非线程安全）。"""
         if mismatch:
-            n = db.mark_count_mismatch_bulk(mismatch)
-            print(f"    ↳ 已写库 {n} 条 → count_mismatch（累计）")
+            n = db.mark_count_mismatch_bulk(list(mismatch))
+            print(f"    ↳ 已写库 {n} 条 → count_mismatch（累计）", flush=True)
             mismatch.clear()
 
-    for i, r in enumerate(rows, 1):
+    def probe_one(r):
+        """实测一帖。返回 (tid, verdict, detail_or_None, kind)。"""
         tid = int(r["tid"])
         got = int(r["posts_n"] or 0)
-        probe = col._probe_site_floors(tid)
-        if not probe.get("ok"):
-            failed.append(tid)
-            verdict = f"实测失败（{probe.get('reason')}）→ 不动"
-        elif probe["count"] <= got:
+        p = col._probe_site_floors(tid)
+        if not p.get("ok"):
+            return tid, f"实测失败（{p.get('reason')}）→ 不动", None, "failed"
+        if p["count"] <= got:
             detail = (f"站方列表称应有 {(r['replies'] or 0) + 1} 楼，"
-                      f"站方详情页实测 {probe['count']} 楼，"
+                      f"站方详情页实测 {p['count']} 楼，"
                       f"本地实收 {got} 楼 —— "
                       f"差额来自站方列表页计数未随删楼而减")
-            mismatch.append((tid, detail))
-            verdict = f"站方计数缺陷 → count_mismatch（实测 {probe['count']} vs 实收 {got}）"
-        else:
-            keep_stale.append(tid)
-            verdict = (f"真漏采 → 保留待补采（实测 {probe['count']} > 实收 {got}）")
-        if i % 20 == 0 or i == len(rows):
-            print(f"  [{i}/{len(rows)}] tid={tid} {verdict}", flush=True)
-        if len(mismatch) >= BATCH:
-            flush()
-        if i < len(rows):
-            time.sleep(args.delay)
+            return (tid,
+                    f"站方计数缺陷 → count_mismatch（实测 {p['count']} vs 实收 {got}）",
+                    detail, "mismatch")
+        return (tid,
+                f"真漏采 → 保留待补采（实测 {p['count']} > 实收 {got}）",
+                None, "keep")
+
+    if args.workers > 1:
+        # ★ 并发：每线程一个 client（http_client 不是线程安全的）
+        from concurrent.futures import ThreadPoolExecutor
+        cols = [DetailCollector(db, Client(cfg), cfg) for _ in range(args.workers)]
+
+        def probe_one_w(r):
+            tid = int(r["tid"])
+            got = int(r["posts_n"] or 0)
+            c = cols[tid % len(cols)]
+            p = c._probe_site_floors(tid)
+            if not p.get("ok"):
+                return tid, f"实测失败（{p.get('reason')}）→ 不动", None, "failed"
+            if p["count"] <= got:
+                detail = (f"站方列表称应有 {(r['replies'] or 0) + 1} 楼，"
+                          f"站方详情页实测 {p['count']} 楼，"
+                          f"本地实收 {got} 楼 —— "
+                          f"差额来自站方列表页计数未随删楼而减")
+                return (tid,
+                        f"站方计数缺陷 → count_mismatch（实测 {p['count']} vs 实收 {got}）",
+                        detail, "mismatch")
+            return (tid,
+                    f"真漏采 → 保留待补采（实测 {p['count']} > 实收 {got}）",
+                    None, "keep")
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for tid, verdict, detail, kind in pool.map(probe_one_w, rows):
+                done += 1
+                if kind == "mismatch":
+                    mismatch.append((tid, detail))
+                elif kind == "keep":
+                    keep_stale.append(tid)
+                else:
+                    failed.append(tid)
+                if done % 50 == 0 or done == len(rows):
+                    print(f"  [{done}/{len(rows)}] tid={tid} {verdict}", flush=True)
+                if len(mismatch) >= BATCH:
+                    flush()
+    else:
+        for i, r in enumerate(rows, 1):
+            tid, verdict, detail, kind = probe_one(r)
+            if kind == "mismatch":
+                mismatch.append((tid, detail))
+            elif kind == "keep":
+                keep_stale.append(tid)
+            else:
+                failed.append(tid)
+            if i % 20 == 0 or i == len(rows):
+                print(f"  [{i}/{len(rows)}] tid={tid} {verdict}", flush=True)
+            if len(mismatch) >= BATCH:
+                flush()
+            if i < len(rows):
+                time.sleep(args.delay)
 
     flush()
 
