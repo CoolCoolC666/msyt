@@ -925,10 +925,16 @@ class DB:
     #   之前整份挂在 job.result 上 → 60 万帖量级时几百 MB，
     #   服务端一份、前端一份、浏览器再一次性 innerHTML 撑爆标签页。
 
-    #: 体检明细的五个类别（接口白名单用）
-    #: ★ 2026-10-28 新增 count_mismatch（站方计数缺陷）
-    INTEGRITY_KINDS = ("problems", "growth", "warnings", "restricted",
-                       "count_mismatch")
+    #: 体检明细的四个类别（接口白名单用）
+    #: ★ 2026-10-29 下线第五类 `count_mismatch`：
+    #:   那个状态的唯一语义是「站方列表计数虚高导致的**假**少贴」，
+    #:   而这批帖的正文**本来就采全了、站方也照样公开**（实测 25 条：
+    #:   站方锚点 == ajax 正文 == 本地实存楼层，pid 集合逐个对得上）。
+    #:   把它们记成「不计入已采详情帖」= **账面上说它们没采到**，
+    #:   而正文明明在库里 —— 这才是真正的逻辑错误。
+    #:   → 正确处置是**正文齐全即已采**（归为 `done`），
+    #:     留痕写在 `detail_warn` 里，不另立状态。详见方案报告 §9.54。
+    INTEGRITY_KINDS = ("problems", "growth", "warnings", "restricted")
 
     def integrity_begin_run(self, run_id: str) -> None:
         """开一次新体检：**清掉上一次的明细**（只保留最新一次）。"""
@@ -1406,33 +1412,28 @@ class DB:
             self.conn.commit()
         return len(tids)
 
-    def mark_count_mismatch(self, tid: int, detail: str) -> None:
-        """标记一帖为「**站方计数缺陷**」（列表页称 N 楼、详情页实测 M 楼）。
+    def mark_detail_done_bulk(self, items: Iterable[Tuple[int, str]]) -> int:
+        """把「**站方列表计数虚高导致的假少贴**」归位为 `done`（正文齐全即已采）。
 
-        ★ 为什么要单独一个状态（2026-10-28 用户拍板）
-          站方删楼后**列表页的 replies 计数不跟着减**，于是出现：
-            列表页称「应有 4 楼」→ 我们算出 expect=replies+1=4，
-            实际详情页只有 3 层楼（1 楼主 + 2 回复 = 3）→ 实收 3 < 4。
+        ★ 为什么是 `done` 而不是另立一个状态（2026-10-29 用户拍板）
+          站方删楼后**列表页的 replies 计数不跟着减**，于是：
+            列表页称「应有 4 楼」→ 我们算出 expect = replies+1 = 4
+            实际详情页只有 3 层楼 → 实收 3 < 4 → 判成「少贴」。
 
-          现场核对（2026-10-28 实测 6 帖，走项目自己的
-          `parse_thread_page` + `parse_ajax_posts` 完整翻页）：
-            tid=8074345  expect=4  实收=3  站方实测=3
-            tid=8074467  expect=8  实收=6  站方实测=6
-            tid=6177045  expect=79 实收=77 站方实测=77（翻满 6 页）
-          → **我们采到的与站方现在有的，一楼不差**。
-          差额 100% 来自站方列表页那个没随删楼而减的计数，
-          这是**站方的数据缺陷**，不是我们漏采。
+          现场核对（实测 25 条，逐层对比）：
+            站方详情页锚点数 == ajax 取到的正文楼层数 == 本地已存楼层数
+            （pid 集合逐个对得上，类型差异除外）
+          → **正文我们早就采全了，站方也照样公开**。
+            差额 100% 来自站方列表页那个没随删楼而减的计数。
 
-          所以它既不能算「采到了」（内容确实少于站方宣称），
-          也不能算「漏采」（该采的都采到了）：
-            · `detail_state='count_mismatch'` → **不计入**「已采详情帖」
-            · 把差额原因**写进正文** → 检索能查到、分析时知道怎么回事
-            · 计数单列「站方计数缺陷」 → 界面上一眼看清多少帖属于这一类
+          ★ 所以「它没采到」是**错的记账**：正文明明在库里，
+            却因为状态是终态而**不计入「已采详情帖」**
+            （`threads_with_body` 的口径是 `chars>0 AND detail_state='done'`），
+            界面上还会显示成「不是已采」——
+            这就是「详情采集采不到这些篇目」的真正来源。
 
-        ★ 与 `restricted` 的区别
-          `restricted` = 站方**不给你看**正文（谁采都采不到）；
-          `count_mismatch` = 正文**采到了**，只是站方列表的计数对不上自己详情页。
-          两者都是终态，但前者是「拿不到」，后者是「拿到了但对不上账」。
+          → 正确处置：**正文齐全即已采** → 归为 `done`，
+            把「站方列表计数虚高」写进 `detail_warn` 留痕即可。
 
         ★ 队列行**必须一并置为终态**（同 mark_restricted 的教训）
           否则它会一直挂在队列 pending 上 → 每轮详情采集都白跑一遍站方请求。
@@ -1440,81 +1441,36 @@ class DB:
           `detail_state='stale'` + 队列 `pending`，
           按单线程 1.5 秒/帖算，**约 41% 的产能被白占**。
 
-        ⚠ 正文标记行的 pid 用**负数**（-tid）：真实 pid 都是正数，
-          负数保证永远不会和站方真实楼层撞号。
-        ⚠ `posts_n` **保留**实测楼层数：正文确实采到了，不该清零
+        ⚠ `posts_n` **保留**、正文**不动**：正文确实采到了
           （`restricted` 清零是因为那不是一层楼）。
-        """
-        detail = (detail or "").strip()
-        content = ("【站方计数缺陷】" + detail +
-                   " —— 正文已按站方详情页实测楼层采全，"
-                   "差额来自站方列表页计数未随删楼而减，非漏采、非失败。")
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
-        with self.lock:
-            self.conn.execute(
-                """INSERT INTO posts
-                   (pid,tid,page_no,floor,author,author_uid,post_time,post_ts,
-                    content,chars,images,fetched_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(pid) DO UPDATE SET
-                     content=excluded.content, chars=excluded.chars,
-                     fetched_at=excluded.fetched_at""",
-                (-int(tid), int(tid), 0, 0, "站方计数", "", now, 0,
-                 content, len(content), "[]", now))
-            self.conn.execute(
-                "UPDATE threads SET detail_state='count_mismatch', detail_warn=?, "
-                "updated_at=? WHERE tid=?",
-                (detail, now, int(tid)))
-            # ★ 队列行置终态：不是「还没采」，是「采到了但对不上账」
-            self.conn.execute(
-                "UPDATE detail_queue SET state='count_mismatch', last_error=?, "
-                "updated_at=? WHERE tid=? AND state IN ('pending','running')",
-                (detail, now, int(tid)))
-            self.conn.commit()
+        ⚠ 会**删掉**此前写的正文标记行（`pid = -tid`）：
+          那是「站方计数缺陷」状态留下的说明行，
+          归位成 done 后它就是多余噪音，还会把 `chars` 算歪。
 
-    def mark_count_mismatch_bulk(self, items: Iterable[Tuple[int, str]]) -> int:
-        """**批量**标记「站方计数缺陷」。
-
-        ★ 为什么要批量版
-          存量有 4384 条（2026-10-28 实测），逐条调用 `mark_count_mismatch`
-          意味着 4384 次独立事务 —— 太慢。这里**一次事务**搞定。
-
-        ★ 语义与 mark_count_mismatch 完全一致
-          · `threads.detail_state='count_mismatch'` → 不计入「已采详情帖」
-          · posts 里写一行说明正文（pid 用 -tid，负数不与真实楼层撞号）
-          · `detail_queue` 行置终态 → **不再被捡起来重采**
-
-        `items` = [(tid, detail_text), ...]
+        `items` = [(tid, note_text), ...]
         """
         now = time.strftime("%Y-%m-%d %H:%M:%S")
-        pairs = [(int(t), (d or "").strip()) for t, d in items]
+        pairs = [(int(t), (n or "").strip()) for t, n in items]
         if not pairs:
             return 0
-        post_rows = []
-        for t, d in pairs:
-            content = ("【站方计数缺陷】" + d +
-                       " —— 正文已按站方详情页实测楼层采全，"
-                       "差额来自站方列表页计数未随删楼而减，非漏采、非失败。")
-            post_rows.append((-t, t, 0, 0, "站方计数", "", now, 0,
-                              content, len(content), "[]", now))
         with self.lock:
+            # 1. 删掉旧状态留下的正文标记行（pid = -tid，负数不与真实楼层撞号）
             self.conn.executemany(
-                """INSERT INTO posts
-                   (pid,tid,page_no,floor,author,author_uid,post_time,post_ts,
-                    content,chars,images,fetched_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(pid) DO UPDATE SET
-                     content=excluded.content, chars=excluded.chars,
-                     fetched_at=excluded.fetched_at""",
-                post_rows)
+                "DELETE FROM posts WHERE pid=? AND tid=? AND pid<0",
+                [(-t, t) for t, _ in pairs])
+            # 2. 帖状态：正文齐全 = 已采
             self.conn.executemany(
-                "UPDATE threads SET detail_state='count_mismatch', detail_warn=?, "
+                "UPDATE threads SET detail_state='done', detail_warn=?, "
                 "updated_at=? WHERE tid=?",
-                [(d, now, t) for t, d in pairs])
+                [(n, now, t) for t, n in pairs])
+            # 3. 队列行置终态：不是「还没采」，是「采到了，站方计数虚高」
+            #    ★ 'count_mismatch' 是 2026-10-28 已下线的历史状态值，
+            #      留在列表里是为了能把那批旧行一并收编成 done。
             self.conn.executemany(
-                "UPDATE detail_queue SET state='count_mismatch', last_error=?, "
-                "updated_at=? WHERE tid=? AND state IN ('pending','running')",
-                [(d, now, t) for t, d in pairs])
+                "UPDATE detail_queue SET state='done', last_error=?, "
+                "updated_at=? WHERE tid=? "
+                "AND state IN ('pending','running','count_mismatch')",
+                [(n, now, t) for t, n in pairs])
             self.conn.commit()
         return len(pairs)
 
@@ -2102,12 +2058,6 @@ class DB:
         # ★ 站方限制（正文不公开）：单独计数，不混进「已采详情帖」
         out["detail_restricted"] = c.execute(
             "SELECT COUNT(*) FROM threads WHERE detail_state='restricted'").fetchone()[0]
-        # ★ 站方计数缺陷（2026-10-28）：列表页称 N 楼、详情页实测 M 楼，
-        #   正文已按实测采全，差额是站方自己删楼后列表计数没减。
-        #   同样**不计入**「已采详情帖」，同样单独计数。
-        out["detail_count_mismatch"] = c.execute(
-            "SELECT COUNT(*) FROM threads "
-            "WHERE detail_state='count_mismatch'").fetchone()[0]
         out["queue"] = {r["state"]: r["n"] for r in c.execute(
             "SELECT state, COUNT(*) n FROM detail_queue GROUP BY state")}
         out["depts"] = c.execute("SELECT COUNT(*) FROM depts").fetchone()[0]

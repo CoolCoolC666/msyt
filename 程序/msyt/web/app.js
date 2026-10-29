@@ -202,11 +202,8 @@ function detailBadge(s) {
               // stale = 站方又回复了，本地正文过时，等着重采
               'stale': 'warn',
               // restricted = 站方限制：历史帖子仅限作者本人查看，正文不公开
-              'restricted': 'warn',
-              // count_mismatch = 站方计数缺陷：列表称 N 楼、详情实测 M 楼
-              'count_mismatch': 'warn' };
-  const label = { stale: '待更新', restricted: '站方限制',
-                  count_mismatch: '站方计数缺陷' };
+              'restricted': 'warn' };
+  const label = { stale: '待更新', restricted: '站方限制' };
   return `<span class="badge ${m[s] || 'none'}">${esc(label[s] || s || '—')}</span>`;
 }
 
@@ -322,8 +319,6 @@ async function loadOverview() {
     ['已采详情帖', num(st.detail_done), '', '通过完整性判据'],
     ['站方限制帖', num(st.detail_restricted || 0), (st.detail_restricted ? 'warn' : ''),
       '站方不公开正文，已标记不计入已采'],
-    ['站方计数缺陷帖', num(st.detail_count_mismatch || 0), (st.detail_count_mismatch ? 'warn' : ''),
-      '正文已采全，但站方列表计数未随删楼而减'],
     ['待采队列', num(q.pending || 0), 'accent', '排在队列里等采'],
     ['失败待重试', num(q.failed || 0), (q.failed ? 'danger' : ''), '需要 retry'],
     ['部门数', num(st.depts), '', '站方部门目录'],
@@ -1490,14 +1485,11 @@ const INT_META = {
     note: '这些帖的详情页在站方只给「提示信息」页（历史帖子仅限作者本人查看），'
         + '属于<b>站方的可见性策略</b>，不是漏采 —— 重跑不会变，因此不提供勾选。',
   },
-  count_mismatch: {
-    title: '站方计数缺陷（正文已采全 · 不计入已采详情帖）',
-    cols: ['TID', '本地楼层', '说明'],
-    cell: (m) => [m.tid, m.posts, m.reason],
-    note: '站方列表页说该帖有 N 楼，但<b>详情页实测只有 M 楼</b>（M ≤ 我们实收）—— '
-        + '说明差额来自<b>站方删楼后列表计数没跟着减</b>，不是我们漏采。'
-        + '正文其实已经采全了，重采多少次都不会变，因此不提供勾选。',
-  },
+  // ★ 2026-10-29 下线「站方计数缺陷」那一栏：
+  //   它的唯一语义是「站方列表计数虚高导致的假少贴」，
+  //   而那批帖的正文**本来就采全了、站方也照样公开**
+  //   → 正确处置是**归为 done（正文齐全即已采）**，
+  //     差额原因写进 detail_warn 留痕，不该在体检里单列一栏。
 };
 
 function intSelTids() {
@@ -1600,7 +1592,6 @@ function intRenderShell(r, opt) {
   let html = `<div class="okbox">检查 ${checked} 帖 · 通过 ${ok} 帖`
     + ` · 问题 ${c('problems')} 条 · 软警告 ${c('warnings')} 条`
     + ` · 已识别增量 ${c('growth')} 条 · 站方限制 ${c('restricted')} 条`
-    + ` · 站方计数缺陷 ${c('count_mismatch')} 条`
     + (opt && opt.last
         ? '<br><span class="hint">（这是<b>上次</b>体检的结果；'
           + '要重新体检请点「开始体检」）</span>' : '')
@@ -1612,12 +1603,9 @@ function intRenderShell(r, opt) {
     const m = INT_META[kind];
     const n = c(kind);
     // ★ 是否可勾选一律看 IntState.SELECTABLE（唯一真值来源），
-    //   不可勾选的原因文案按类别给（restricted 是「采不到」，
-    //   count_mismatch 是「采到了但对不上账」）。
+    //   不可勾选的原因文案按类别给。
     const selectable = IntState.SELECTABLE.indexOf(kind) >= 0;
-    const noPickWhy = (kind === 'count_mismatch')
-      ? '（正文已采全，重跑多少次都不会变）'
-      : '（重跑多少次都是同一个提示页）';
+    const noPickWhy = '（重跑多少次都是同一个提示页）';
     html += `<details class="int-sec" id="int-sec-${kind}" data-int-kind="${kind}">`
       + `<summary><b>${m.title}</b> <span class="hint">${n} 条</span></summary>`
       + '<div class="row" style="margin:8px 0 4px">'
@@ -1647,8 +1635,8 @@ function intRenderShell(r, opt) {
 function intTableHtml(kind) {
   const m = INT_META[kind];
   // ★ 是否画勾选列，一律看 IntState.SELECTABLE（唯一真值来源）。
-  //   旧写法硬编码 `kind === 'restricted'` → 新增类别（count_mismatch）
-  //   会被误画成可勾选 → 勾了只会让成员白跑（它重采多少次都不会变）。
+  //   旧写法硬编码 `kind === 'restricted'` → 以后新增类别会被误画成可勾选
+  //   → 勾了只会让成员白跑（它重采多少次都不会变）。
   const sel = IntState.SELECTABLE.indexOf(kind) >= 0;
   const head = (sel ? '<th></th>' : '')
     + m.cols.map(c => `<th>${c}</th>`).join('');

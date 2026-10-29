@@ -71,7 +71,7 @@ class AssistService:
             params.append(f",{i},")
         rows = self.db.conn.execute(
             "SELECT tid FROM threads "
-            "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch') "
+            "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted') "
             f"AND ({' OR '.join(parts)}) "
             "ORDER BY COALESCE(pub_ts,0) DESC, tid DESC", params).fetchall()
         tids = [r["tid"] for r in rows]

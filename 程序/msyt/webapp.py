@@ -606,7 +606,7 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
       被当成「还没采详情」全筛进来（实测筛出 584,587 帖）→
       这些帖**永远采不到**（站方只给提示页），却排在队首 →
       worker 一上来就撞上它们 → 白烧产能、界面看着像「如跑」。
-      → 口径与 `/api/pending` 一致：`NOT IN ('done','restricted','count_mismatch')`。
+      → 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`。
       （`stale` = 待重采，仍要入选 —— 它确实还要采。）
     """
     ids = [str(x) for x in (dept_ids or []) if str(x).strip()]
@@ -620,7 +620,7 @@ def _tids_for_depts(db: DB, dept_ids: List[int]) -> List[int]:
         params.append(f",{i},")
     rows = db.conn.execute(
         "SELECT tid FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch') "
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted') "
         f"AND ({' OR '.join(parts)}) "
         "ORDER BY COALESCE(pub_ts,0) ASC, tid ASC", params).fetchall()
     return [r["tid"] for r in rows]
@@ -777,7 +777,7 @@ def api_pending(request: Request,
     tids = _tids_for_depts(db, ids)
     total_pending = db.conn.execute(
         "SELECT COUNT(*) FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch')"
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted')"
     ).fetchone()[0]
     return {"dept_ids": ids, "pending": len(tids), "total_pending": total_pending,
             "sample": tids[:20]}
@@ -796,7 +796,7 @@ def api_pending_by_dept(request: Request) -> Dict[str, Any]:
       109 个部门发 109 次 → 接口刷屏、页面卡。
       → 一次查询 + 内存归组。
 
-    ★ 口径与 `/api/pending` 一致：`NOT IN ('done','restricted','count_mismatch')`
+    ★ 口径与 `/api/pending` 一致：`NOT IN ('done','restricted')`
       （restricted = 站方不公开正文，永远采不到，不该算进工作量）
     """
     _require_member(request)
@@ -804,7 +804,7 @@ def api_pending_by_dept(request: Request) -> Dict[str, Any]:
     db = get_db(cfg)
     rows = db.conn.execute(
         "SELECT dept_id, extra_dept_ids FROM threads "
-        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted','count_mismatch')"
+        "WHERE COALESCE(detail_state,'pending') NOT IN ('done','restricted')"
     ).fetchall()
     counts: Dict[int, int] = {}
     for r in rows:

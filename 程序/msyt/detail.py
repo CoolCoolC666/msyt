@@ -58,6 +58,27 @@ GAP_RETRY_MARK = "补采次数"
 #: 补采次数的正则（读取端统一用它）
 GAP_RETRY_RE = r"补采次数[:：]\s*(\d+)"
 
+# ★ 2026-10-29：「计数核对」标记（与「补采次数」同一个设计模式 ——
+#   **计数与叙述文案解耦**，文案随便改，标记独立可解析）
+#:
+#: 记什么：这一帖的**站方列表计数虚高**已经按**详情页实测**核对过，
+#:   记下「实测几楼」与「当时列表称几楼」。
+#:
+#: 为什么需要（不记会怎样）：
+#:   站方列表的 replies 删楼后不跟着减 → 这批帖**永远**满足
+#:   「列表称 N 楼 > 我们实收 M 楼」→ 少贴分支每次都会触发
+#:   → 每次体检 / 每轮采集都要**重新实测一遍站方**（3079 条 = 3079 次请求）
+#:   → 白烧站方请求，正是我们一开始要治的病。
+#:
+#: 为什么带上「列表称几楼」：
+#:   站方**新增回复**时列表计数会涨 —— 那是**真增量**，必须被发现并补采。
+#:   所以只有在「列表计数**没变**」时才能用旧实测值顶替；
+#:   列表计数一旦变了，就必须重新实测。判定因此是安全的。
+COUNT_VER_MARK = "计数核对"
+COUNT_VER_RE = re.compile(
+    r"计数核对[:：]\s*已按详情页实测"
+    r"（实测\s*(\d+)\s*楼，列表称\s*(\d+)\s*楼）")
+
 #: ★ 并发采集时**进度日志的刷新间隔**（秒）—— 2026-10-25 用户要求
 #:   「加上一个只打进度不逐帖打」「大概每5-10s刷新一次」
 #:
@@ -372,26 +393,65 @@ class DetailCollector:
             _short = expect_posts - len(unique)
             _reason = (f"少贴：站方称应有 {expect_posts} 楼，实收 {len(unique)} 楼"
                        f"（少 {_short} 楼）")
-            _probe = self._probe_site_floors(tid)
+            # ★ 2026-10-29：**能复用上次的实测值，就不必再打一次站方**
+            #   站方列表计数虚高 → 这批帖每次都触发少贴分支
+            #   → 每次体检/采集都重测一遍 = 白烧站方请求。
+            #   复用条件（有标记 + 列表计数**没变** + 实测值仍 ≥ 实收）：
+            #     · 列表计数变了 = 站方可能有**新回复** → 必须重新实测，不能复用
+            #     · 实测值 < 实收   = 站方确实还有楼 → 必须重新实测
+            _prev_warn0 = self.db.get_detail_warn(tid) or ""
+            _cm = re.search(COUNT_VER_RE, _prev_warn0)
+            if (_cm and int(_cm.group(2)) == expect_posts
+                    and int(_cm.group(1)) >= len(unique)):
+                _probe = {"ok": True, "count": int(_cm.group(1)), "pages": 0,
+                          "reason": "", "restricted": False, "notice": ""}
+            else:
+                _probe = self._probe_site_floors(tid)
+            _probe_note = ""
+            # ★ 2026-10-29：正文齐全 = 已采（见下）。这个标志用来
+            #   **跳过**「少贴 → 标 stale 待补采」那一段。
+            _count_verified = False
+            if _probe.get("restricted"):
+                # ★ 站方限制：详情页只给「提示信息」页（历史帖仅限作者本人查看），
+                #   正文不公开 —— 谁采都采不到 → 终态，不再补采。
+                #   ★ 2026-10-29 补上这条分支：以前这里不判，
+                #     会落到「实测失败 → 不下结论」→ 永远卡 stale + 队列 pending，
+                #     每轮采集白烧站方请求。
+                _notice = self.db._clean_notice(_probe.get("notice") or "")
+                self.db.mark_restricted(tid, _notice)
+                self.db.log("detail", str(tid), "restricted", True, _notice)
+                return {"tid": tid, "ok": False, "restricted": True,
+                        "reason": _notice, "pages": pages_fetched,
+                        "posts": len(unique), "chars": chars,
+                        "error": _notice, "problems": [],
+                        "warnings": [_notice],
+                        "head_pid": head_pid, "tail_pid": tail_pid,
+                        "stopped": stopped}
             if not _probe.get("ok"):
                 # ★ 实测不成 → **不下结论**（宁可多补一次，不能误标终态）
-                _probe_note = f"；实测失败（{_probe.get('reason') or '原因未知'}），按原逻辑补采"
+                _probe_note = (f"；实测失败（{_probe.get('reason') or '原因未知'}），"
+                               f"按原逻辑补采")
             elif _probe["count"] <= len(unique):
-                # ★★ 站方实测楼层数 <= 我们实收 → **没有更多楼可采**
+                # ★★ 2026-10-29 修正（用户拍板）：**正文齐全 = 已采**
+                #   站方删楼后列表页 replies 不跟着减 → 差额是站方自己的数据缺陷。
+                #   而这批帖的正文**我们本来就采全了、站方也照样公开**
+                #   （实测 25 条逐层对比：站方详情页锚点数 == ajax 正文楼层数
+                #   == 本地实存楼层数，pid 集合逐个对得上）。
+                #   → 所以**不能**把它记成「不计入已采详情帖」的终态：
+                #     那等于账面上说它没采到，而正文明明在库里。
+                #   → 正确处置：正常走 done，只把差额原因写进 detail_warn 留痕。
                 _mismatch_detail = (f"站方列表称应有 {expect_posts} 楼，"
                                     f"站方详情页实测 {_probe['count']} 楼，"
                                     f"本地实收 {len(unique)} 楼 —— "
-                                    f"差额来自站方列表页计数未随删楼而减")
-                self.db.mark_count_mismatch(tid, _mismatch_detail)
-                self.db.log("detail", str(tid), "count_mismatch", True,
+                                    f"差额来自站方列表页计数未随删楼而减；"
+                                    f"正文已按详情页实测核对，判定为已采全；"
+                                    f"{COUNT_VER_MARK}：已按详情页实测"
+                                    f"（实测 {_probe['count']} 楼，"
+                                    f"列表称 {expect_posts} 楼）")
+                _count_verified = True
+                warnings.append(_mismatch_detail)
+                self.db.log("detail", str(tid), "count_verified", True,
                             _mismatch_detail)
-                return {"tid": tid, "ok": False, "count_mismatch": True,
-                        "reason": _mismatch_detail, "pages": pages_fetched,
-                        "posts": len(unique), "chars": chars,
-                        "error": _mismatch_detail, "problems": [],
-                        "warnings": [_mismatch_detail],
-                        "head_pid": head_pid, "tail_pid": tail_pid,
-                        "stopped": stopped}
             else:
                 # ★ 真漏采：站方实测比我们多 → 该补采
                 _probe_note = (f"；站方详情页实测 {_probe['count']} 楼 > "
@@ -402,20 +462,23 @@ class DetailCollector:
             # ★★ 2026-10-28 修正计数口径：只认**独立的**补采次数标记，
             #   原来的 `已补采 N 次` 与文案「→ 已标记待补采」互相干扰，
             #   导致第 3 次采集后仍标 stale、每轮都要重跑这批帖。
-            _prev = self.db.get_detail_warn(tid) or ""
-            _m = re.search(r"补采次数[:：]\s*(\d+)", _prev)
-            _tried = int(_m.group(1)) if _m else 0
-            if _tried < GAP_RETRY_MAX:
-                # ★ 这里**只算不动作** —— 真正的 mark_detail_stale() 要等到
-                #   写完 detail_state='done' **之后**再做，
-                #   否则会被后面的 set_thread_detail(state='done') 覆盖掉。
-                _gap_retry = (tid, _reason, _tried)
-                warnings.append(_reason)
-            else:
-                _reason2 = (f"{_reason}；但已补采 {_tried} 次仍对不齐"
-                            f"（疑为站方计数口径差异，不再自动补采）")
-                warnings.append(_reason2)
-                self.db.log("detail", str(tid), "warn", True, _reason2)
+            # ★ 2026-10-29：正文已按实测核对为齐全的（_count_verified）
+            #   **不进这一段** —— 它不是「少贴」，不该标 stale、不该补采。
+            if not _count_verified:
+                _prev = self.db.get_detail_warn(tid) or ""
+                _m = re.search(r"补采次数[:：]\s*(\d+)", _prev)
+                _tried = int(_m.group(1)) if _m else 0
+                if _tried < GAP_RETRY_MAX:
+                    # ★ 这里**只算不动作** —— 真正的 mark_detail_stale() 要等到
+                    #   写完 detail_state='done' **之后**再做，
+                    #   否则会被后面的 set_thread_detail(state='done') 覆盖掉。
+                    _gap_retry = (tid, _reason, _tried)
+                    warnings.append(_reason)
+                else:
+                    _reason2 = (f"{_reason}；但已补采 {_tried} 次仍对不齐"
+                                f"（疑为站方计数口径差异，不再自动补采）")
+                    warnings.append(_reason2)
+                    self.db.log("detail", str(tid), "warn", True, _reason2)
 
         if problems:
             if not last_error:
@@ -847,7 +910,7 @@ class DetailCollector:
 
         ★ 为什么需要这个方法（2026-10-28）
           「少贴」的判据原来是拿**列表页计数**当期望值，
-          而站方删楼后那个计数不��减 → 我们把「站方自己删掉的楼」
+          而站方删楼后那个计数不跟着减 → 我们把「站方自己删掉的楼」
           误判成「我们漏采的楼」→ 无限补采、白烧站方请求。
           实测 4384 条卡在 `detail_state='stale'` + 队列 pending，
           按单线程 1.5 秒/帖算约 41% 产能被白占。
@@ -862,15 +925,42 @@ class DetailCollector:
             "count": int,        # 站方现在给的楼层数
             "pages": int,        # 翻了几页
             "reason": str,       # 失败原因（ok=False 时有值）
+            "restricted": bool,  # 站方限制：详情页只给「提示信息」页，正文不公开
+            "notice": str,       # 站方提示原文（restricted=True 时有值）
           }
         """
-        res: Dict = {"ok": False, "count": 0, "pages": 0, "reason": ""}
+        res: Dict = {"ok": False, "count": 0, "pages": 0, "reason": "",
+                     "restricted": False, "notice": ""}
         seen_pids = set()
         site_pages = 0
         try:
             for page_no in range(1, max_pages + 1):
                 url = THREAD_URL.format(tid=tid, page=page_no)
                 html = self.client.get(url, referer=url).text
+                # ★★ 2026-10-29：站方限制识别（与采集主流程同一套判据）
+                #   历史帖只给「提示信息」页：没有楼层锚点、也没有 token。
+                #   ★ **必须复验**：站方会**间歇性**返回提示页
+                #     （采集主流程 2026-10-25 实测过），采信一次就可能
+                #     把明明可见的帖误判成「站方限制」（终态、不可逆）。
+                #   → 复验：再请求一次同 URL；能拿到楼层/token → 是瞬时异常。
+                notice = parse_site_notice(html)
+                if notice:
+                    html2 = ""
+                    try:
+                        html2 = self.client.get(url, referer=url).text
+                    except HttpError:
+                        html2 = ""
+                    n2 = parse_site_notice(html2) if html2 else ""
+                    tp2 = (parse_thread_page(html2, tid=tid, page_no=page_no)
+                           if html2 else None)
+                    if not n2 and tp2 is not None and tp2.token and tp2.pids:
+                        # 复验通过 → 不是站方限制，是瞬时故障 → 继续正常实测
+                        html, tp = html2, tp2
+                    else:
+                        res["restricted"] = True
+                        res["notice"] = (n2 or notice)
+                        res["reason"] = f"站方提示信息页（{res['notice'][:40]}）"
+                        break
                 tp = parse_thread_page(html, tid=tid, page_no=page_no)
                 if not tp.token:
                     res["reason"] = f"page{page_no} 没取到 token"
@@ -1014,12 +1104,12 @@ class DetailCollector:
           不在这里标，它永远不会被重新采集，也就永远不会被补采（死锁）。
         """
         out: Dict = {"checked": 0, "ok": 0, "problems": [], "warnings": [],
-                     "growth": [], "restricted": [], "count_mismatch": [],
+                     "growth": [], "restricted": [],
                      "counts": {}}
         # ★ 计数与「明细去哪儿」的唯一出口 —— 所有明细都从这里走，
         #   保证「counts」与「实际落库的条数」永远一致。
         cnt: Dict[str, int] = {"problems": 0, "growth": 0, "warnings": 0,
-                               "restricted": 0, "count_mismatch": 0}
+                               "restricted": 0}
 
         def _emit(kind: str, item: Dict) -> None:
             cnt[kind] += 1
@@ -1037,24 +1127,17 @@ class DetailCollector:
                 "reason": r["detail_warn"] or "站方限制：历史帖子仅限作者本人查看",
                 "posts": 0, "pages": 0,
                 "note": "已标记并写入正文标记，不计入已采详情帖"})
-        # ★ 站方计数缺陷的帖**单独一栏**（2026-10-28）：
-        #   列表页称 N 楼、站方详情页实测 M 楼（M <= 我们实收）——
-        #   正文其实已经采全了，差额是站方删楼后列表计数没减。
-        #   它既不是硬问题（不是我们漏采），也不是软警告（不是站方的可见性策略），
-        #   而是**站方自己的数据对不上账** → 单独一栏，事实记录。
-        for r in self.db.conn.execute(
-                "SELECT tid, detail_warn, posts_n FROM threads "
-                "WHERE detail_state='count_mismatch'").fetchall():
-            _emit("count_mismatch", {
-                "tid": r["tid"],
-                "reason": r["detail_warn"] or "站方计数与详情页实际楼层对不上",
-                "posts": r["posts_n"] or 0, "pages": 0,
-                "note": "正文已按站方详情页实测采全，不计入已采详情帖"})
+        # ★ 2026-10-29 下线「站方计数缺陷」那一栏：
+        #   它的唯一语义是「站方列表计数虚高导致的假少贴」，
+        #   而这批帖的正文**本来就采全了、站方也照样公开**
+        #   → 正确处置是**归为 done（正文齐全即已采）**，
+        #     差额原因写进 detail_warn 留痕即可，
+        #     不该在体检里单列一栏、更不该不计入已采详情帖。详见 §9.54。
         rows = self.db.conn.execute(
             "SELECT tid, detail_state, replies, posts_n, first_post_id, "
-            "last_post_id, pages_total FROM threads "
+            "last_post_id, pages_total, detail_warn FROM threads "
             "WHERE detail_state IS NOT NULL AND detail_state<>'' "
-            "AND detail_state NOT IN ('pending','stale','restricted','count_mismatch')").fetchall()
+            "AND detail_state NOT IN ('pending','stale','restricted')").fetchall()
         # 「站方又回复了 → 待重采」的帖 —— 这才是**真正识别出来的增量**
         for r in self.db.conn.execute(
                 "SELECT tid, replies, posts_n FROM threads "
@@ -1094,20 +1177,48 @@ class DetailCollector:
                         short = (r["replies"] + 1) - uniq
                         reason = (f"少贴：站方称应有 {r['replies'] + 1} 楼，"
                                   f"实收 {uniq} 楼（少 {short} 楼）")
-                        # ★★★ 2026-10-28 修正：**实测优先，别拿列表计数当权威**
+                        # ★★★ 2026-10-29 修正：**实测优先，别拿列表计数当权威**
                         #   站方删楼后列表页 replies 不减 → 差额是站方自己删掉的楼。
                         #   这里若照旧 mark_detail_stale，会把这批帖反复丢回队列，
                         #   每轮详情采集都白跑一遍站方请求（实测 4384 条卡住）。
                         #   → 先实测站方详情页现在有几层楼，以实测为准。
+                        #
+                        # ★ 2026-10-29：已按详情页实测核对过、且**列表计数没变**的帖
+                        #   → 正文齐全、已归位为 done，**无事可做**：
+                        #     不实测（省一次站方请求）、不写库、不 emit。
+                        #   （列表计数变了 = 可能有新回复 → 必须重新实测，
+                        #     所以这一条只在「列表称几楼」没变时才成立。）
+                        _ww = r["detail_warn"] or ""
+                        _cm = re.search(COUNT_VER_RE, _ww)
+                        if (_cm and int(_cm.group(2)) == r["replies"] + 1
+                                and int(_cm.group(1)) >= uniq):
+                            continue
                         _probe = self._probe_site_floors(r["tid"])
-                        if _probe.get("ok") and _probe["count"] <= uniq:
-                            # 站方实测 <= 实收 → 站方没有更多楼 → **站方计数缺陷**
+                        if _probe.get("restricted"):
+                            # ★ 站方限制：详情页只给「提示信息」页，正文不公开
+                            _notice = self.db._clean_notice(
+                                _probe.get("notice") or "")
+                            self.db.mark_restricted(r["tid"], _notice)
+                            _emit("restricted", {
+                                "tid": r["tid"], "reason": _notice,
+                                "posts": 0, "pages": 0,
+                                "note": "已标记并写入正文标记，不计入已采详情帖"})
+                        elif _probe.get("ok") and _probe["count"] <= uniq:
+                            # ★★ 正文齐全 = 已采（2026-10-29 用户拍板）
+                            #   站方列表计数虚高，差额是站方自己的数据缺陷；
+                            #   而正文我们本来就采全了、站方也照样公开。
+                            #   → 归位为 **done**（正文齐全即已采），
+                            #     差额原因 + 核对标记写进 detail_warn 留痕。
                             _mm_detail = (f"站方列表称应有 {r['replies'] + 1} 楼，"
                                           f"站方详情页实测 {_probe['count']} 楼，"
                                           f"本地实收 {uniq} 楼 —— "
-                                          f"差额来自站方列表页计数未随删楼而减")
-                            self.db.mark_count_mismatch(r["tid"], _mm_detail)
-                            warns.append(_mm_detail)
+                                          f"差额来自站方列表页计数未随删楼而减；"
+                                          f"正文已按详情页实测核对，判定为已采全；"
+                                          f"{COUNT_VER_MARK}：已按详情页实测"
+                                          f"（实测 {_probe['count']} 楼，"
+                                          f"列表称 {r['replies'] + 1} 楼）")
+                            self.db.mark_detail_done_bulk(
+                                [(r["tid"], _mm_detail)])
                         else:
                             # ★ 实测失败或实测更多 → 真漏采 → 照旧补采
                             # ★ 读补采次数要在**写之前**（先算 _tried，再写新值）

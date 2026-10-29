@@ -53,8 +53,9 @@ MEMBER = ("test@example.com", os.environ.get("MSYT_TEST_PW", "test-password"))
 RUN_ID = "TESTPAGING"
 #: 合成数据各类的条数（不依赖真扫全库，测试可秒级完成）
 N_PROBLEMS, N_GROWTH, N_WARNINGS, N_RESTRICTED = 250, 30, 12, 7
-#: ★ 2026-10-28 新增第五类：站方计数缺陷（count_mismatch）
-N_MISMATCH = 5
+#: ★ 2026-10-29 下线第五类 count_mismatch（站方计数缺陷）：
+#:   那批帖的正文**本来就采全了**（实测 25 条逐层对比），
+#:   正确处置是**归为 done（正文齐全即已采）**，不再单列一栏。
 
 results = []
 
@@ -110,11 +111,9 @@ def seed():
             " VALUES(?,?,?,?,?)",
             (RUN_ID, "2999-01-01 00:00:00", 999, 700,
              json.dumps({"problems": N_PROBLEMS, "growth": N_GROWTH,
-                         "warnings": N_WARNINGS, "restricted": N_RESTRICTED,
-                         "count_mismatch": N_MISMATCH})))
+                         "warnings": N_WARNINGS, "restricted": N_RESTRICTED})))
         for kind, n in (("problems", N_PROBLEMS), ("growth", N_GROWTH),
-                        ("warnings", N_WARNINGS), ("restricted", N_RESTRICTED),
-                        ("count_mismatch", N_MISMATCH)):
+                        ("warnings", N_WARNINGS), ("restricted", N_RESTRICTED)):
             rows = [(i, 90000000 + i, json.dumps({"tid": 90000000 + i,
                                                    "posts": i, "pages": 1,
                                                    "problems": ["测试项"]},
@@ -218,28 +217,6 @@ def main() -> int:
               st == 200 and len(d.get("tids") or []) == N_RESTRICTED,
               f"HTTP {st} {len(d.get('tids') or [])} 条")
 
-        print("\n=== ③' 第五类：站方计数缺陷（count_mismatch）===")
-        st, d = call(f"/api/integrity/page?kind=count_mismatch&page=1&page_size=50"
-                     f"&run_id={RUN_ID}", "GET", None, atok)
-        check("count_mismatch 的 page → 200（新增类别已贯通后端）",
-              st == 200, f"HTTP {st} {d}")
-        check("count_mismatch 总条数正确",
-              (d.get("total") if isinstance(d, dict) else None) == N_MISMATCH,
-              str(d.get("total") if isinstance(d, dict) else d))
-        st, d = call(f"/api/integrity/tids?kind=count_mismatch&run_id={RUN_ID}",
-                     "GET", None, atok)
-        check("count_mismatch 的 tids 能取到（数据在，前端不提供勾选）",
-              st == 200 and len(d.get("tids") or []) == N_MISMATCH,
-              f"HTTP {st} {len(d.get('tids') or [])} 条")
-        st, d = call(f"/api/integrity/summary?run_id={RUN_ID}", "GET", None, atok)
-        cnt = (d.get("run") or {}).get("counts") if isinstance(d, dict) else None
-        check("summary 的 counts 里含 count_mismatch",
-              isinstance(cnt, dict) and cnt.get("count_mismatch") == N_MISMATCH,
-              str(cnt))
-        st, d = call(f"/api/integrity/page?kind=count_mismatch&run_id={RUN_ID}",
-                     "GET", None, mtok)
-        check("成员调 count_mismatch → 403（仍是管理员专属）", st == 403, f"HTTP {st}")
-
         print("\n=== ④ 参数与权限 ===")
         st, d = call("/api/integrity/page?kind=evil&run_id=" + RUN_ID,
                      "GET", None, atok)
@@ -288,7 +265,7 @@ def main() -> int:
               "__ISV__" in idx, "")
 
         print("\n=== ⑧' 静态检查：勾选列必须按 SELECTABLE 判断（2026-10-28）===")
-        # ★ 新增类别（count_mismatch）后，若前端还硬编码 `kind === 'restricted'`
+        # ★ 新增类别后，若前端还硬编码 `kind === 'restricted'`
         #   来决定画不画勾选框 → 新类别会被误画成可勾选 →
         #   勾了只会让成员白跑（它重采多少次都不会变）。
         check("app.js 的勾选列按 IntState.SELECTABLE 判断，不硬编码类别名",
@@ -303,8 +280,8 @@ def main() -> int:
               .split("var SELECTABLE")[1].split(";")[0],
               "count_mismatch 被误列入可勾选")
         from msyt.db import DB as _DB
-        check("后端 INTEGRITY_KINDS 含 count_mismatch",
-              "count_mismatch" in _DB.INTEGRITY_KINDS, str(_DB.INTEGRITY_KINDS))
+        check("后端 INTEGRITY_KINDS 只剩四类（count_mismatch 已下线）",
+              "count_mismatch" not in _DB.INTEGRITY_KINDS, str(_DB.INTEGRITY_KINDS))
     finally:
         unseed(db)
 

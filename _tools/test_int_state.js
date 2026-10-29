@@ -82,15 +82,17 @@ function suite(S) {
   add('★ restricted 不在可勾选的三类里',
       S.SELECTABLE.indexOf('restricted') === -1
       && S.SELECTABLE.length === 3, JSON.stringify(S.SELECTABLE));
-  // ★ 2026-10-28 新增第五类 count_mismatch（站方计数缺陷）→
-  //   与 restricted 同理：正文已采全，重采多少次都不会变 → 不可勾选。
-  add('★ count_mismatch 不在可勾选的三类里',
-      S.SELECTABLE.indexOf('count_mismatch') === -1
-      && S.SELECTABLE.length === 3, JSON.stringify(S.SELECTABLE));
-  add('五个类别齐全',
-      S.KINDS.length === 5
+  // ★ 2026-10-29 下线第五类 count_mismatch（站方计数缺陷）→
+  //   那批帖的正文**本来就采全了**（实测 25 条逐层对比），正确处置是
+  //   **归为 done（正文齐全即已采）**，不再单列一栏。
+  add('★ 已下线的 count_mismatch 不在类别里',
+      S.KINDS.indexOf('count_mismatch') === -1, JSON.stringify(S.KINDS));
+  add('四个类别齐全',
+      S.KINDS.length === 4
       && S.KINDS.indexOf('restricted') >= 0
-      && S.KINDS.indexOf('count_mismatch') >= 0,
+      && S.KINDS.indexOf('problems') >= 0
+      && S.KINDS.indexOf('growth') >= 0
+      && S.KINDS.indexOf('warnings') >= 0,
       JSON.stringify(S.KINDS));
 
   // ⑤ 导出与清空

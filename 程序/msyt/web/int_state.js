@@ -16,14 +16,13 @@
 (function (root) {
   'use strict';
 
-  /** 体检明细的五个类别（与后端 DB.INTEGRITY_KINDS 一致）
-   *  ★ 2026-10-28 新增 count_mismatch（站方计数缺陷）：
-   *    列表页称 N 楼、站方详情页实测 M 楼（M <= 我们实收）——
-   *    正文其实已经采全了，差额是站方删楼后列表计数没减。
-   *    与 restricted 同理：**不可勾选** —— 重采多少次都不会变，
-   *    勾了只会让成员白跑。 */
-  var KINDS = ['problems', 'growth', 'warnings', 'restricted', 'count_mismatch'];
-  /** 其中**可勾选**的三类（restricted / count_mismatch 不可勾选） */
+  /** 体检明细的四个类别（与后端 DB.INTEGRITY_KINDS 一致）
+   *  ★ 2026-10-29 下线第五类 count_mismatch：
+   *    它的唯一语义是「站方列表计数虚高导致的假少贴」，
+   *    而那批帖的正文**本来就采全了、站方也照样公开**
+   *    → 正确处置是**归为 done（正文齐全即已采）**，不再单列一栏。 */
+  var KINDS = ['problems', 'growth', 'warnings', 'restricted'];
+  /** 其中**可勾选**的三类（restricted 不可勾选） */
   var SELECTABLE = ['problems', 'growth', 'warnings'];
 
   function createState() {
