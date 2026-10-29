@@ -103,11 +103,17 @@ def main() -> int:
     #   边跑边写 → 每批都是终态，中断也不损失已完成的批次。
     BATCH = 200
     lock = threading.Lock()
+    #: ★ 已写库条数要**独立于待写列表**：
+    #   flush() 会把 done_items 清空（分批提交），
+    #   若最后直接 len(done_items) 统计，会显示 0 —— 输出误导。
+    done_written = 0
 
     def flush():
         """把攒下的 done_items 写库。**只在主线程调用**（sqlite 连接非线程安全）。"""
+        nonlocal done_written
         if done_items:
             n = db.mark_detail_done_bulk(list(done_items))
+            done_written += n
             print(f"    ↳ 已写库 {n} 条 → done（正文齐全，累计）", flush=True)
             done_items.clear()
 
@@ -226,7 +232,7 @@ def main() -> int:
 
     print()
     print("=" * 60)
-    print(f"正文齐全（→ done，正文齐全即已采）: {len(done_items)}")
+    print(f"正文齐全（→ done，正文齐全即已采）: {done_written}")
     print(f"站方限制（→ restricted）            : {len(restricted_items)}")
     print(f"站方限制但本地有正文（保持原状）    : {len(skipped)}")
     print(f"真漏采（保留待补采）                : {len(keep_stale)}")
