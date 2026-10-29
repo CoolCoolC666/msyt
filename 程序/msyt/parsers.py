@@ -431,6 +431,42 @@ _NOTICE_PAT = re.compile(
     r'(?:<div[^>]*class="[^"]*(?:alert_error|alert_info|alert_warning)[^"]*"[^>]*>'
     r'|<div[^>]*id="message"[^>]*>)(.*?)(?:</div>)', re.S | re.I)
 
+#: ★★ 2026-10-29 新增：站方还有**第二种**「提示信息」页 ——
+#:   请求**超出实际范围**的页码时返回它（实测 tid=8207278：
+#:   站方标「共 2 页」，但第 2/3/4… 页全部返回 23108 字节的
+#:   「提示信息 - 中国宁波网民生e点通-天一论坛」页，无 token、无楼层锚点）。
+#:
+#:   ★ 它和「站方限制」是**两回事**，必须分开：
+#:     · 站方限制（历史帖子仅限作者本人查看）→ 谁都采不到 → 终态 restricted
+#:     · 超范围页（页码不存在）            → 说明**已经翻到底了** → 不是错误
+#:
+#:   判据：标题含「提示信息」+ 页面里没有楼层锚点、没有 token、
+#:         且**不含**「历史帖子仅限作者本人查看」。
+_NOTICE_TITLE_PAT = re.compile(r"<title>(.*?)</title>", re.S | re.I)
+
+
+def is_out_of_range_page(html: str) -> bool:
+    """这个页面是不是站方对「超出范围的页码」给的提示页？
+
+    ★ 与 `parse_site_notice`（站方限制）**故意不重叠**：
+      站方限制页含「历史帖子仅限作者本人查看」，这里必须排除它。
+
+    ★ 为什么需要它（2026-10-29 实测）
+      站方标的总页数**不可信**：它会多标（删楼后不更新），
+      于是「只采到 1/2 页」被判成 incomplete → 该帖永远卡在队列里重试。
+      实际上第 2 页是「不存在」而不是「没采到」→ 应当正常收尾。
+    """
+    if not html:
+        return False
+    if SITE_RESTRICTED in html:
+        return False                      # 那是站方限制，归 parse_site_notice 管
+    if 'id="post_' in html or "token:'" in html:
+        return False                      # 有楼层/有 token → 是真帖，不是提示页
+    m = _NOTICE_TITLE_PAT.search(html)
+    if not m or "提示信息" not in m.group(1):
+        return False
+    return True
+
 
 def parse_site_notice(html: str) -> str:
     """这个页面是不是站方的「提示信息」页？返回提示原文（没有则返回空串）。

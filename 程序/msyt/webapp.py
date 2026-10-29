@@ -757,9 +757,15 @@ def api_thread(tid: int, request: Request) -> Dict[str, Any]:
         "FROM posts WHERE tid=? ORDER BY page_no, floor, pid", (tid,))]
     flows = [dict(r) for r in db.conn.execute(
         "SELECT step,name,time FROM flows WHERE tid=? ORDER BY step", (tid,))]
+    # ★ 2026-10-29：页信息改成**从 posts 表现算**，不再直出 thread_pages。
+    #   实测全库 19 万行 thread_pages 里有 7.7 万行 pids 字段是写坏的
+    #   （"1,,,1,,,3,,,…"）→ 直出会把垃圾串显示给用户。
+    #   posts 表才是内容的权威 → 由它现算每页的 pid 与条数。
     pages = [dict(r) for r in db.conn.execute(
-        "SELECT page_no,pids,n,status,fetched_at FROM thread_pages "
-        "WHERE tid=? ORDER BY page_no", (tid,))]
+        "SELECT page_no, GROUP_CONCAT(DISTINCT pid) AS pids, "
+        "COUNT(DISTINCT pid) AS n, 'ok' AS status, "
+        "MAX(fetched_at) AS fetched_at "
+        "FROM posts WHERE tid=? GROUP BY page_no ORDER BY page_no", (tid,))]
     queue = db.conn.execute(
         "SELECT * FROM detail_queue WHERE tid=?", (tid,)).fetchone()
     return {"thread": thread, "posts": posts, "flows": flows, "pages": pages,

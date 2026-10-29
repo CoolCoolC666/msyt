@@ -1273,6 +1273,18 @@ class DB:
           Discuz 会把**置顶回复**额外渲染在第 1 页顶部，而那个位置**没有楼层号**
           （标签是「顶 来自 #」）；它在自己的页上才有真号（如 33#）。
           所以第 1 页解析出的 floor=0 **不能**覆盖掉后面页解析出的真楼层号。
+
+        ⚠★ 2026-10-29：`page_no` 同样**不能**被无条件覆盖。
+          站方会**跨页重复渲染**同一批回复（实测 tid=8294530：
+          第 4 页的 pid 全是第 1、2 页那批；tid=8214148 更极端，
+          第 3、4 页整页都是前两页的 pid）。
+          旧写法 `page_no=excluded.page_no` 会让**后采的重复页把先采的
+          page_no 改掉** → 同一 pid 的 page_no 变成"最后一次出现的页"，
+          于是「posts 按页分布」错乱（实测 8294530 采完后是
+          page1=15 / page2=10 / page3=5 / page4=15，合计 45，
+          而实际应该是 page1=15 / page2=15 / page3=15 / page4=15 / …），
+          `pages_fetched`（按 posts 的 page_no 计数）也跟着算错。
+          → 改成：**保留最早记录的 page_no**（首次采集到的位置才是归属页）。
         """
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         with self.lock:
@@ -1282,7 +1294,8 @@ class DB:
                     content,chars,images,fetched_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(pid) DO UPDATE SET
-                     page_no=excluded.page_no,
+                     page_no=CASE WHEN posts.page_no IS NULL OR posts.page_no<=0
+                                  THEN excluded.page_no ELSE posts.page_no END,
                      floor=CASE WHEN excluded.floor>0 THEN excluded.floor
                                 ELSE posts.floor END,
                      author=excluded.author, author_uid=excluded.author_uid,

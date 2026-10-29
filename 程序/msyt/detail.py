@@ -39,8 +39,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .config import AJAX_URL, BASE, Config, THREAD_URL
 from .db import DB
 from .http_client import Client, HttpError
-from .parsers import (ThreadPage, parse_ajax_posts, parse_site_notice,
-                     parse_thread_page)
+from .parsers import (ThreadPage, is_out_of_range_page, parse_ajax_posts,
+                     parse_site_notice, parse_thread_page)
 from .textutil import extract_images, html_to_text
 
 
@@ -169,6 +169,9 @@ class DetailCollector:
         # **必须用它封顶**：单页帖请求 page=2 会回绕返回第 1 页，
         # 盲翻会把第 1 页当第 2 页重复采一遍。
         site_total_pages = int(pages_total or 0)
+        # 连续多少页内容与上一页完全相同（站方回绕时用来收尾，见循环末尾）
+        _repeat_pages = 0
+        _prev_page_pids: set = set()
 
         while page_no <= page_budget:
             if should_stop is not None and should_stop():
@@ -223,6 +226,16 @@ class DetailCollector:
 
             tp = parse_thread_page(html, tid=tid, page_no=page_no)
             if not tp.token:
+                # ★★ 2026-10-29：**站方标的页数不可信**，它会多标
+                #   （删楼后不更新）。实测 tid=8207278：站方标「共 2 页」，
+                #   但第 2 页起返回的是「提示信息」页（无 token、无楼层锚点）
+                #   —— 说明**这一页根本不存在**，不是「没采到」。
+                #   → 这种情况下**正常收尾**，不再判 incomplete，
+                #     否则该帖会永远卡在队列里重试（实测已重试 5 次）。
+                if is_out_of_range_page(html):
+                    last_error = (f"第 {page_no} 页超出站方实际范围"
+                                  f"（站方标 {site_total_pages} 页），已翻到底")
+                    break
                 last_error = f"page{page_no} 没取到 token"
                 break
             if site_total_pages and page_no > site_total_pages:
@@ -315,8 +328,35 @@ class DetailCollector:
 
             if site_total_pages and page_no >= site_total_pages:
                 break
-            if not new_pids and page_no > 1:
-                break
+            # ★★★ 2026-10-29 修正：**不能因为「本页没有新 pid」就停止翻页**
+            #   旧逻辑：`if not new_pids and page_no > 1: break`
+            #   站方会**跨页重复渲染**同一批回复（实测 tid=8214148：
+            #   第 1、2 页给 pid 113196495…113202410（楼层 1-29），
+            #   第 3、4 页**又是这批 pid**（楼层整体后移到 31-48）），
+            #   置顶回复 pid=113197168 更是在 3 页里各出现一次
+            #   （floor=0 / floor=22 / floor=41）。
+            #   → 走到那一页时 `new_pids` 为空 → 旧逻辑**立刻停止翻页**
+            #     → 后面页的新内容永远采不到
+            #     → 同时 record_page 仍把该页记成 ok → thread_pages 虚高
+            #     → 又触发「只采到 N/M 页」→ 两个 bug 互相掩护，死循环。
+            #
+            # ★★ 第二次修正（2026-10-29 晚）：**不能用「相对库里的 new_pids」判定**
+            #   `new_pids` 是相对 `seen_set`（= 库里已有的 pid）算的，
+            #   而重采一个已经采过的帖时，**每页的 new_pids 都是 0**
+            #   （实测 tid=8294530：库里已有 45 篇，重采时第 1-4 页 new_pids 全 0
+            #     → 连续 3 页 → 提前收尾 → 站方 6 页 59 篇只采到 45 篇）
+            #   → 改成用**本页 pid 集合与上一页比较**：
+            #     · 与上一页**完全相同** → 站方在回绕（同一页内容）→ 收尾
+            #     · 只是没有相对库里的新 pid → **继续翻**（可能后面页有新内容）
+            if _prev_page_pids and set(tp.pids) == _prev_page_pids:
+                _repeat_pages += 1
+                # ★ 连续 3 页都与上一页内容相同 → 站方在重复渲染同一页
+                #   （不是「到底了」——到底了会走超范围页/无 token 分支）→ 收尾。
+                if _repeat_pages >= 3:
+                    break
+            else:
+                _repeat_pages = 0
+            _prev_page_pids = set(tp.pids)
             page_no += 1
 
         # ------------------------------------------------------------------
@@ -358,10 +398,27 @@ class DetailCollector:
             problems.append("缺头（楼主楼）")
         if not tail_pid:
             problems.append("缺尾（末楼）")
+        # ★★ 2026-10-29：**空正文不再算漏采**（改为软警告）。
+        #   实测 6 条「正文为空」的楼层，逐条回站方核对：
+        #   站方 postmsg_ 原文**本身就是空的**（作者删了正文 / 纯媒体帖），
+        #   不是我们 html_to_text 解析漏了 —— 站方 ajax 给的原始 HTML
+        #   长度就是 0，我们解析得没错，只是站方没内容。
+        #   → 旧判据把它当硬问题 → 这批帖每天重试一次、永远卡住。
         if content_missing:
-            problems.append(f"{content_missing} 个楼层正文为空")
+            warnings.append(f"{content_missing} 个楼层正文为空"
+                            f"（站方原文即为空，非采集遗漏）")
+
+        # ★★ 2026-10-29：**「只采到 N/M 页」不再是硬判据**。
+        #   站方标的总页数 M **不可信**，实测两种翻车：
+        #     ① 多标：删楼后不更新（tid=8207278 标 2 页，实际只有 1 页）
+        #     ② 回绕：请求超范围页时返回**最后一页的内容**
+        #        （tid=8214148 标 4 页，page5~8 全返回第 4 页的楼层 46,47,48）
+        #   用它当硬判据 → 内容早就采全的帖被判成 incomplete → 死循环重试。
+        #   → 完整性改由**楼层集合是否覆盖站方全部楼层**决定（见下方 _probe）。
+        #   这里的页数比较降级为**软警告**，仅用于留痕。
         if site_total_pages and pages_fetched < site_total_pages:
-            problems.append(f"只采到 {pages_fetched}/{site_total_pages} 页")
+            warnings.append(f"只采到 {pages_fetched}/{site_total_pages} 页"
+                            f"（站方标的页数会多标，完整性以楼层集合为准）")
 
         if floors:
             mx = max(floors)
@@ -404,7 +461,8 @@ class DetailCollector:
             if (_cm and int(_cm.group(2)) == expect_posts
                     and int(_cm.group(1)) >= len(unique)):
                 _probe = {"ok": True, "count": int(_cm.group(1)), "pages": 0,
-                          "reason": "", "restricted": False, "notice": ""}
+                          "reason": "", "restricted": False, "notice": "",
+                          "pids": set(), "floors": set()}
             else:
                 _probe = self._probe_site_floors(tid)
             _probe_note = ""
@@ -431,31 +489,60 @@ class DetailCollector:
                 # ★ 实测不成 → **不下结论**（宁可多补一次，不能误标终态）
                 _probe_note = (f"；实测失败（{_probe.get('reason') or '原因未知'}），"
                                f"按原逻辑补采")
-            elif _probe["count"] <= len(unique):
-                # ★★ 2026-10-29 修正（用户拍板）：**正文齐全 = 已采**
-                #   站方删楼后列表页 replies 不跟着减 → 差额是站方自己的数据缺陷。
-                #   而这批帖的正文**我们本来就采全了、站方也照样公开**
-                #   （实测 25 条逐层对比：站方详情页锚点数 == ajax 正文楼层数
-                #   == 本地实存楼层数，pid 集合逐个对得上）。
-                #   → 所以**不能**把它记成「不计入已采详情帖」的终态：
-                #     那等于账面上说它没采到，而正文明明在库里。
-                #   → 正确处置：正常走 done，只把差额原因写进 detail_warn 留痕。
-                _mismatch_detail = (f"站方列表称应有 {expect_posts} 楼，"
-                                    f"站方详情页实测 {_probe['count']} 楼，"
-                                    f"本地实收 {len(unique)} 楼 —— "
-                                    f"差额来自站方列表页计数未随删楼而减；"
-                                    f"正文已按详情页实测核对，判定为已采全；"
-                                    f"{COUNT_VER_MARK}：已按详情页实测"
-                                    f"（实测 {_probe['count']} 楼，"
-                                    f"列表称 {expect_posts} 楼）")
-                _count_verified = True
-                warnings.append(_mismatch_detail)
-                self.db.log("detail", str(tid), "count_verified", True,
-                            _mismatch_detail)
             else:
-                # ★ 真漏采：站方实测比我们多 → 该补采
-                _probe_note = (f"；站方详情页实测 {_probe['count']} 楼 > "
-                               f"实收 {len(unique)} 楼 → 真漏采，应补采")
+                # ★★★ 2026-10-29 判据核心：**用 pid 集合比，不用数量比**
+                #   为什么不能用数量比：
+                #     · 站方**会重复渲染**同一批回复（实测 tid=8214148：
+                #       第 1、2 页给 pid 113196495…113202410（楼层 1-29），
+                #       第 3、4 页**又是这批 pid**（楼层整体后移到 31-48），
+                #       置顶回复 pid=113197168 更是在 3 页里各出现一次）
+                #       → 站方楼层并集 47 但 pid 并集只有 29
+                #     · 楼层号是**站方渲染的产物**，不是内容的真实标识
+                #   → 「实测楼层数 > 实收楼层数」会**误报漏采**
+                #     （8214148 会误报 18 层，实际一个 pid 都不缺）
+                #   → 唯一可靠的判据：**站方 pid 集合 ⊆ 本地 pid 集合**
+                _site_pids = _probe.get("pids") or set()
+                _local_pids = set(int(p) for p in unique)
+                if _site_pids:
+                    _missing = _site_pids - _local_pids
+                    if not _missing:
+                        # ★ 站方现在公开的每一篇，我们库里都有 → 正文已采全
+                        _mismatch_detail = (
+                            f"站方列表称应有 {expect_posts} 楼，"
+                            f"站方详情页实测 {len(_site_pids)} 篇，"
+                            f"本地实收 {len(_local_pids)} 篇 —— "
+                            f"站方列表页计数未随删楼而减；"
+                            f"正文已按详情页实测 pid 集合核对，判定为已采全；"
+                            f"{COUNT_VER_MARK}：已按详情页实测"
+                            f"（实测 {len(_site_pids)} 篇，"
+                            f"列表称 {expect_posts} 楼）")
+                        _count_verified = True
+                        warnings.append(_mismatch_detail)
+                        self.db.log("detail", str(tid), "count_verified", True,
+                                    _mismatch_detail)
+                    else:
+                        # ★ 真漏采：站方有的 pid 我们没有 → 确实漏了
+                        _probe_note = (
+                            f"；站方详情页实测 {len(_site_pids)} 篇 > "
+                            f"实收 {len(_local_pids)} 篇，"
+                            f"缺 {len(_missing)} 篇（pid 差集）→ 真漏采，应补采")
+                elif _probe["count"] <= len(unique):
+                    # 兜底：拿不到 pid 集合（复用了上次的实测值）→ 退回数量比
+                    _mismatch_detail = (f"站方列表称应有 {expect_posts} 楼，"
+                                        f"站方详情页实测 {_probe['count']} 楼，"
+                                        f"本地实收 {len(unique)} 楼 —— "
+                                        f"差额来自站方列表页计数未随删楼而减；"
+                                        f"正文已按详情页实测核对，判定为已采全；"
+                                        f"{COUNT_VER_MARK}：已按详情页实测"
+                                        f"（实测 {_probe['count']} 楼，"
+                                        f"列表称 {expect_posts} 楼）")
+                    _count_verified = True
+                    warnings.append(_mismatch_detail)
+                    self.db.log("detail", str(tid), "count_verified", True,
+                                _mismatch_detail)
+                else:
+                    _probe_note = (f"；站方详情页实测 {_probe['count']} 楼 > "
+                                   f"实收 {len(unique)} 楼 → 真漏采，应补采")
             _reason += _probe_note
 
             # 补采过几次？（防止无限重采）
@@ -527,6 +614,57 @@ class DetailCollector:
         return {"tid": tid, "ok": True, "pages": pages_fetched, "posts": len(unique),
                 "chars": chars, "head_pid": head_pid, "tail_pid": tail_pid,
                 "warnings": warnings, "stopped": stopped}
+
+    # ------------------------------------------------------------------
+    def collect_one_full(self, tid: int, max_recheck: int = 1,
+                         pages_done: int = 0, pages_total: int = 0,
+                         max_attempts: int = 3,
+                         should_stop=None) -> Dict:
+        """采一帖详情 + **采后 pid 集合闭环校验**（2026-10-29 加）。
+
+        ★ 为什么需要这个外层闭环
+          `collect_one` 内部循环「跑完了」≠「采全了」，实测有三类漏：
+            ① 站方跨页重复渲染 → 循环可能在整页都是重复内容时就收尾
+               （实测 tid=8294530：站方 6 页 59 篇，采完本地只有 45 篇）
+            ② 断点续传从 `pages_done+1` 起步 → 前面缺的页**永远补不上**
+               （实测 tid=8294530 队列 pages_done=4 → 从第 5 页开始）
+            ③ `save_posts` 的 page_no 覆盖（已修）→ 按页分布错乱，
+               进而 pages_fetched 算错、完整性判据失真
+          → 所以：**采完实测一次站方的 pid 集合**，
+            比我们库里少的 → **从第 1 页完整重采一轮**（pid 已存在的走
+            upsert，不会重复写；page_no 已改成「保留最早」，不会被覆盖）。
+          → 只重采一轮（`max_recheck`），避免无限重采白烧站方请求。
+
+        ★ 实测成本
+          每帖多一次「翻完全部页」的实测（每页 1 次 GET + 1 次 ajax）。
+          只在**详情采集**这条链路上，不影响列表采集。
+        """
+        res = self.collect_one(tid, pages_done=pages_done,
+                               pages_total=pages_total,
+                               max_attempts=max_attempts,
+                               should_stop=should_stop)
+        for _round in range(max_recheck):
+            if res.get("restricted") or res.get("stopped"):
+                return res
+            verify = self._probe_site_floors(tid, max_pages=DETAIL_PAGE_HARD_CAP)
+            if not verify.get("ok") or not verify.get("pids"):
+                return res                      # 实测不成 → 不下结论
+            local_pids = set(int(p) for p in self._unique_pids(tid))
+            missing = verify["pids"] - local_pids
+            if not missing:
+                return res                      # 齐了 → 收工
+            self.db.log("detail", str(tid), "recheck", False,
+                        f"采后实测缺 {len(missing)} 篇 → 从第 1 页重采一轮")
+            self.client.log(
+                f"[detail] tid={tid} 采后实测缺 {len(missing)} 篇，"
+                f"从第 1 页重采一轮")
+            # ★ 从第 1 页重采（pages_done=0）：
+            #   站方重复渲染会让「页」与「内容」的对应不稳定，
+            #   只补缺的那几页可能补错位置 → 整帖重走一遍最稳。
+            res = self.collect_one(tid, pages_done=0, pages_total=0,
+                                   max_attempts=max_attempts,
+                                   should_stop=should_stop)
+        return res
 
     # ------------------------------------------------------------------
     def run(self, limit: int = 0, max_attempts: int = 3,
@@ -639,9 +777,10 @@ class DetailCollector:
                 if item is None:
                     break
                 tid = item["tid"]
-                res = self.collect_one(tid, pages_done=item.get("pages_done") or 0,
-                                       pages_total=item.get("pages_total") or 0,
-                                       max_attempts=max_attempts)
+                res = self.collect_one_full(
+                    tid, pages_done=item.get("pages_done") or 0,
+                    pages_total=item.get("pages_total") or 0,
+                    max_attempts=max_attempts)
                 if res["ok"]:
                     done += 1
                     state["done"] = done
@@ -729,7 +868,7 @@ class DetailCollector:
                     return
                 tid = item["tid"]
                 try:
-                    res = dc.collect_one(
+                    res = dc.collect_one_full(
                         tid, pages_done=item.get("pages_done") or 0,
                         pages_total=item.get("pages_total") or 0,
                         max_attempts=max_attempts, should_stop=should_stop)
@@ -905,8 +1044,16 @@ class DetailCollector:
             return 0
         return int(r["replies"]) + 1
 
-    def _probe_site_floors(self, tid: int, max_pages: int = 12) -> Dict:
+    def _probe_site_floors(self, tid: int,
+                           max_pages: int = DETAIL_PAGE_HARD_CAP) -> Dict:
         """**实测**站方现在给这帖多少层楼。
+
+        ★★ 2026-10-29：`max_pages` 默认值从 12 改成 `DETAIL_PAGE_HARD_CAP`
+          旧默认 12 页 → 长帖**永远测不全**：
+          实测 tid=8333204（站方 81 页 1203 篇）实测只拿到 **180 篇**
+          （12 页 × 15）→ 拿 180 去和本地 1201 比 → 判「站方比我们少」→
+          **掩盖了真漏采**（实际站方多 2 篇）。
+          → 页数上限只该用来防「站方给出离谱页数」，不该限制正常长帖。
 
         ★ 为什么需要这个方法（2026-10-28）
           「少贴」的判据原来是拿**列表页计数**当期望值，
@@ -922,16 +1069,33 @@ class DetailCollector:
         ★ 返回
           {
             "ok": bool,          # 是否成功实测（False 表示站方不可达，不能下结论）
-            "count": int,        # 站方现在给的楼层数
+            "count": int,        # 站方现在给的**去重 pid 数**（= 内容条数）
             "pages": int,        # 翻了几页
             "reason": str,       # 失败原因（ok=False 时有值）
             "restricted": bool,  # 站方限制：详情页只给「提示信息」页，正文不公开
             "notice": str,       # 站方提示原文（restricted=True 时有值）
+            "pids": set,         # ★★ 站方现在公开的**全部 pid 集合**（2026-10-29）
+            "floors": set,       #   站方渲染出的楼层号集合（**仅供参考**，会重复）
           }
+
+        ★★ 2026-10-29 重大修正：**判据必须是 pid 集合，不是楼层集合**
+          实测 tid=8214148：站方把同一批回复**重复渲染**了一遍 ——
+            第 1、2 页给 pid 113196495…113202410（楼层 1-29），
+            第 3、4 页**又是这批 pid**（楼层被整体后移到 31-48），
+            且置顶回复 pid=113197168 在第 1 页显示 floor=0、第 2 页 floor=22、
+            第 3 页又显示 floor=41。
+          → 站方 pid 并集 = 29（真实内容 29 篇），
+            站方楼层并集 = 47（渲染产物，含重复）。
+          → 用楼层集合判「有没有漏采」会**误报 18 层漏采**，
+            而实际上我们本地 29 个 pid **一个不缺** → 正文早采全了。
+          → 结论：**内容是否采全，只看 pid 集合**。
+            楼层号只用于展示与「站方删楼/置顶」提示。
         """
         res: Dict = {"ok": False, "count": 0, "pages": 0, "reason": "",
-                     "restricted": False, "notice": ""}
+                     "restricted": False, "notice": "",
+                     "pids": set(), "floors": set()}
         seen_pids = set()
+        seen_floors = set()
         site_pages = 0
         try:
             for page_no in range(1, max_pages + 1):
@@ -963,6 +1127,14 @@ class DetailCollector:
                         break
                 tp = parse_thread_page(html, tid=tid, page_no=page_no)
                 if not tp.token:
+                    # ★★ 2026-10-29：站方标的页数**不可信**，它会多标。
+                    #   请求超范围页码时站方返回「提示信息」页（无 token、无楼层），
+                    #   实测 tid=8207278：标「共 2 页」，第 2 页起全是提示页。
+                    #   → 这说明**已经翻到底**，不是失败 → 正常收尾。
+                    if is_out_of_range_page(html):
+                        res["reason"] = (f"第 {page_no} 页超出站方实际范围"
+                                          f"（站方标 {site_pages} 页）")
+                        break
                     res["reason"] = f"page{page_no} 没取到 token"
                     break
                 if site_pages and page_no > site_pages:
@@ -972,6 +1144,10 @@ class DetailCollector:
                 if not tp.pids:
                     break
                 seen_pids.update(tp.pids)
+                for _pid in tp.pids:
+                    _fm = tp.floors.get(_pid)
+                    if _fm and _fm.floor is not None and _fm.floor > 0:
+                        seen_floors.add(int(_fm.floor))
                 res["pages"] = page_no
                 # ★ 页数够站方说的那么多 → 不用再翻
                 if site_pages and page_no >= site_pages:
@@ -1005,6 +1181,8 @@ class DetailCollector:
                         break
             res["ok"] = bool(seen_pids)
             res["count"] = len(seen_pids)
+            res["pids"] = seen_pids
+            res["floors"] = seen_floors
         except Exception as e:                                  # noqa: BLE001
             res["reason"] = f"实测失败: {e}"
         return res
@@ -1026,11 +1204,23 @@ class DetailCollector:
         return {r["floor"] for r in rows}
 
     def _pages_fetched(self, tid: int) -> int:
-        """已成功入库的页数（从 thread_pages 数，不看本次跑了几页 ——
-        断点续传时本次只跑后半段，但整帖的页数是累计的）。"""
+        """已成功入库的页数。
+
+        ★★ 2026-10-29 修正：**不信 thread_pages 的行数**。
+          实测两类坏记录（27 条卡死帖里各占一部分）：
+            ① 记录写着 status='ok'，但 posts 表里那一页**一行都没有**
+               （实测 tid=8214148：记录页 [1,2,3]，posts 只有 1、2 页；
+                 tid=8161820：记录页 [1,2]，posts 只有第 2 页）
+            ② pids 字段被**写坏**（实测 tid=8294530 第 3、4 页存成
+               "1,,,1,,,3,,,4,,,…" —— 明显是别的数据串进来了）
+          用它算「采到几页」会**虚高** → 于是「只采到 N/M 页」误判成
+          incomplete → 该帖永远卡在队列里重试。
+          → 改成**以 posts 表里真实存在的 page_no 为准**：
+            posts 有这一页的行，才算这一页采到了。
+        """
         r = self.db.conn.execute(
-            "SELECT COUNT(*) FROM thread_pages WHERE tid=? AND status='ok'",
-            (tid,)).fetchone()
+            "SELECT COUNT(DISTINCT page_no) FROM posts WHERE tid=?", (tid,)
+        ).fetchone()
         return int(r[0])
 
     def _head_tail(self, tid: int) -> Tuple[Optional[int], Optional[int]]:
@@ -1043,23 +1233,26 @@ class DetailCollector:
             (tid,)).fetchone()
         head = r["pid"] if r else None
         if head is None:
+            # ★ 2026-10-29：**不再退回 thread_pages.pids** ——
+            #   实测全库 19 万行里有 7.7 万行 pids 字段是**写坏的**
+            #   （存成 "1,,,1,,,3,,,4,,,…"，显然串了别的数据），
+            #   拿它当 pid 解析会得到垃圾值 → 头/尾判据失效。
+            #   → 改成从 posts 表按页序取第一个（内容才是权威）。
             rows = self.db.conn.execute(
-                "SELECT pids FROM thread_pages WHERE tid=? AND status='ok' "
-                "ORDER BY page_no", (tid,)).fetchall()
+                "SELECT pid FROM posts WHERE tid=? ORDER BY page_no, floor LIMIT 1",
+                (tid,)).fetchall()
             if rows:
-                first = rows[0]["pids"].split(",")[0]
-                head = int(first) if first else None
+                head = rows[0]["pid"]
         r2 = self.db.conn.execute(
             "SELECT pid FROM posts WHERE tid=? AND floor>0 ORDER BY floor DESC LIMIT 1",
             (tid,)).fetchone()
         tail = r2["pid"] if r2 else None
         if tail is None:
             rows = self.db.conn.execute(
-                "SELECT pids FROM thread_pages WHERE tid=? AND status='ok' "
-                "ORDER BY page_no DESC", (tid,)).fetchall()
+                "SELECT pid FROM posts WHERE tid=? ORDER BY page_no DESC, floor DESC LIMIT 1",
+                (tid,)).fetchall()
             if rows:
-                lst = rows[0]["pids"].split(",")
-                tail = int(lst[-1]) if lst and lst[-1] else None
+                tail = rows[0]["pid"]
         return head, tail
 
     # ------------------------------------------------------------------

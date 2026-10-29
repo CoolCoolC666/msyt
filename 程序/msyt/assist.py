@@ -415,7 +415,7 @@ class AssistService:
             "SELECT COUNT(*) n, COALESCE(SUM(chars),0) c FROM posts WHERE tid=?",
             (int(tid),)).fetchone()
         n_pages = self.db.conn.execute(
-            "SELECT COUNT(*) n FROM thread_pages WHERE tid=? AND status='ok'",
+            "SELECT COUNT(DISTINCT page_no) n FROM posts WHERE tid=?",
             (int(tid),)).fetchone()["n"]
         head_r = self.db.conn.execute(
             "SELECT pid FROM posts WHERE tid=? AND floor=1 ORDER BY page_no LIMIT 1",
