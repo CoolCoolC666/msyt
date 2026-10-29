@@ -94,6 +94,7 @@ def main() -> int:
     done_items: list[tuple[int, str]] = []
     restricted_items: list[int] = []
     keep_stale: list[int] = []
+    skipped: list[int] = []
     failed: list[int] = []
     t0 = time.time()
     # ★ 分批提交（每批 200 条就写一次库）：
@@ -118,6 +119,15 @@ def main() -> int:
         p = col._probe_site_floors(tid)
         if p.get("restricted"):
             notice = db._clean_notice(p.get("notice") or "")
+            # ★ 防丢数据：本地**已经有正文**的帖，不许标 restricted ——
+            #   restricted 的既有语义是「正文不公开 → posts_n 清零 + 写提示正文行」，
+            #   而这批帖的正文是我们**真采到过**的（站方后来才隐藏），
+            #   清零 = 把已经采到的正文扔掉。
+            #   → 保持原状、单独报出来，等人决定怎么处理。
+            if got > 0:
+                return (tid,
+                        f"站方限制但本地已有 {got} 楼正文 → 不动（避免清零丢数据）",
+                        None, "skip")
             return tid, f"站方限制 → restricted（{notice[:24]}）", notice, "restricted"
         if not p.get("ok"):
             return tid, f"实测失败（{p.get('reason')}）→ 不动", None, "failed"
@@ -150,6 +160,11 @@ def main() -> int:
             p = c._probe_site_floors(tid)
             if p.get("restricted"):
                 notice = db._clean_notice(p.get("notice") or "")
+                # ★ 防丢数据：本地已有正文的帖不标 restricted（见 probe_one 注释）
+                if got > 0:
+                    return (tid,
+                            f"站方限制但本地已有 {got} 楼正文 → 不动（避免清零丢数据）",
+                            None, "skip")
                 return (tid, f"站方限制 → restricted（{notice[:24]}）",
                         notice, "restricted")
             if not p.get("ok"):
@@ -179,6 +194,8 @@ def main() -> int:
                     restricted_items.append(tid)
                 elif kind == "keep":
                     keep_stale.append(tid)
+                elif kind == "skip":
+                    skipped.append(tid)
                 else:
                     failed.append(tid)
                 if done % 50 == 0 or done == len(rows):
@@ -194,6 +211,8 @@ def main() -> int:
                 restricted_items.append(tid)
             elif kind == "keep":
                 keep_stale.append(tid)
+            elif kind == "skip":
+                skipped.append(tid)
             else:
                 failed.append(tid)
             if i % 20 == 0 or i == len(rows):
@@ -209,6 +228,7 @@ def main() -> int:
     print("=" * 60)
     print(f"正文齐全（→ done，正文齐全即已采）: {len(done_items)}")
     print(f"站方限制（→ restricted）            : {len(restricted_items)}")
+    print(f"站方限制但本地有正文（保持原状）    : {len(skipped)}")
     print(f"真漏采（保留待补采）                : {len(keep_stale)}")
     print(f"实测失败（不动）                    : {len(failed)}")
     print(f"耗时 {time.time() - t0:.1f}s")
