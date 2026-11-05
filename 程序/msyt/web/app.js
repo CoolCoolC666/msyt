@@ -213,7 +213,7 @@ function detailBadge(s) {
    成员  ：总览 / 检索与浏览 / 采集与协作 / 采集日志
            **完整性体检隐藏**（那是管理员对全库做质量自查的视角）
    界面层藏 + 接口层 require_admin，两道都做 —— 缺一道等于没锁。 */
-const TABS_FOR_MEMBER = ['overview', 'threads', 'collect', 'log'];
+const TABS_FOR_MEMBER = ['overview', 'threads', 'keywords', 'collect', 'log'];
 
 function showSub(sub) {
   const target = sub || 'jobs';
@@ -250,6 +250,7 @@ $$('#tabs button').forEach(btn => {
     $('#tab-' + btn.dataset.tab).classList.remove('hidden');
     if (btn.dataset.tab === 'overview') loadOverview();
     if (btn.dataset.tab === 'threads') { if (!state.meta) await loadMeta(); loadThreads(); }
+    if (btn.dataset.tab === 'keywords') loadKeywords();
     if (btn.dataset.tab === 'collect') {
       if (!state.token) { showLogin('请先登录'); return; }
       if (!state.meta) await loadMeta();
@@ -2029,6 +2030,9 @@ async function afterLogin() {
     ? '在**这台机器**上采集（管理员端）'
     : '在**你自己的电脑**上采集（需要本机 agent）';
   $('#btn-detail').title = $('#btn-list').title;
+  // ★ 词表：成员**能看**（看词、看命中），**不能改**（管理行藏起来，
+  //   服务端写接口也是 require_admin —— 界面与接口两道都收）。
+  $('#kw-admin-row').style.display = isAdmin ? '' : 'none';
 
   if (isAdmin) await loadMembers();
   await loadAssistTasks();
@@ -3002,6 +3006,162 @@ $('#btn-st-clear').onclick = () => {
   logStream.clear('等待日志…');
 };
 $('#st-all').onchange = () => { /* 过滤在 onmessage 里做 */ };
+
+/* ---------------- 词表（关键词设计） ----------------
+   界面层：成员**能看**词表与命中，但不能改（管理行对成员隐藏）；
+   接口层：改词/删词/扫描是 require_admin —— 两道都收。 */
+const kwState = { hitsKid: 0, hitsPage: 0, hitsTotal: 0, scanTimer: null };
+
+async function loadKeywords() {
+  const box = $('#t-keywords');
+  if (!box) return;
+  let d;
+  try { d = await api('/api/keywords'); }
+  catch (e) {
+    box.innerHTML = `<tbody><tr><td colspan="7" class="hint">载入失败：${esc(e.message)}</td></tr></tbody>`;
+    return;
+  }
+  const items = d.items || [];
+  const sel = $('#kw-kind');
+  if (sel && !sel.options.length) {
+    const cn = d.kind_cn || {};
+    sel.innerHTML = Object.keys(cn).map(k =>
+      `<option value="${esc(k)}">${esc(cn[k])}</option>`).join('');
+  }
+  box.innerHTML = `
+    <thead><tr><th>词</th><th>词类</th><th>父词</th><th>命中帖</th><th>命中楼层</th>
+      <th>状态</th><th>备注</th><th>操作</th></tr></thead>
+    <tbody>${items.length ? items.map(k => `<tr>
+      <td><b>${esc(k.word)}</b></td>
+      <td class="nowrap">${esc(k.kind_cn || k.kind)}</td>
+      <td class="dim">${esc(k.parent || '—')}</td>
+      <td class="num">${num(k.hit_tids)}</td>
+      <td class="num">${num(k.hit_posts)}</td>
+      <td class="nowrap">${k.enabled
+        ? '<span class="badge done">启用</span>'
+        : '<span class="badge none">停用</span>'}</td>
+      <td class="txt" title="${esc(k.note || '')}">${esc(k.note || '')}</td>
+      <td class="nowrap">
+        <button class="ghost tiny" data-kw-hits="${k.id}">命中</button>
+        <button class="ghost tiny" data-kw-toggle="${k.id}" data-on="${k.enabled ? 1 : 0}">
+          ${k.enabled ? '停用' : '启用'}</button>
+        <button class="ghost tiny" data-kw-del="${k.id}">删除</button>
+      </td></tr>`).join('')
+      : '<tr><td colspan="8" class="hint">词表还是空的（管理员在下面加词）</td></tr>'}</tbody>`;
+}
+
+async function loadKwHits(kid, page) {
+  const box = $('#t-kwhits');
+  if (!box) return;
+  kwState.hitsKid = Number(kid);
+  kwState.hitsPage = Math.max(0, page || 0);
+  const limit = 50;
+  const offset = kwState.hitsPage * limit;
+  let d;
+  try { d = await api(`/api/keywords/${kid}/hits?limit=${limit}&offset=${offset}`); }
+  catch (e) {
+    box.innerHTML = `<tbody><tr><td colspan="6" class="hint">载入失败：${esc(e.message)}</td></tr></tbody>`;
+    return;
+  }
+  kwState.hitsTotal = Number(d.total || 0);
+  const items = d.items || [];
+  $('#kw-hits-title').textContent = `（词 #${kid}）`;
+  box.innerHTML = `
+    <thead><tr><th>TID</th><th class="col-title">标题</th><th>部门</th><th>受理状态</th>
+      <th>命中楼层数</th><th>发帖时间</th></tr></thead>
+    <tbody>${items.length ? items.map(x => `<tr>
+      <td class="num">${esc(x.tid)}</td>
+      <td class="txt" title="${esc(x.title || '')}">${esc(x.title || '')}</td>
+      <td class="nowrap">${esc(x.dept_name || '')}</td>
+      <td class="nowrap">${esc(x.state || '—')}</td>
+      <td class="num">${num(x.post_count)}</td>
+      <td class="nowrap sub2">${esc(x.pub_time || '—')}</td>
+    </tr>`).join('')
+      : '<tr><td colspan="6" class="hint">这个词还没有命中记录（要先扫描）</td></tr>'}</tbody>`;
+  const pages = Math.max(1, Math.ceil(kwState.hitsTotal / limit));
+  if (kwState.hitsPage >= pages) kwState.hitsPage = pages - 1;
+  $('#kw-hits-info').textContent =
+    `第 ${kwState.hitsPage + 1} / ${pages} 页（共 ${num(kwState.hitsTotal)} 帖）`;
+  $('#kw-hits-prev').disabled = kwState.hitsPage <= 0;
+  $('#kw-hits-next').disabled = kwState.hitsPage >= pages - 1;
+}
+
+/* 扫描是后台任务（近百万行正文）→ 轮询任务状态 */
+async function runKwScan() {
+  const st = $('#kw-scan-status');
+  try {
+    const d = await api('/api/keywords/scan', { method: 'POST' });
+    const jid = d.job.id;
+    st.textContent = '扫描中…';
+    clearInterval(kwState.scanTimer);
+    kwState.scanTimer = setInterval(async () => {
+      try {
+        const j = await api('/api/jobs/' + jid);
+        if (j.state === 'running') {
+          st.textContent = '扫描中… ' + (j.last_progress || '');
+          return;
+        }
+        clearInterval(kwState.scanTimer);
+        kwState.scanTimer = null;
+        if (j.state === 'done') {
+          const r = j.result || {};
+          st.textContent = `扫描完成：${r.words || 0} 个词 · 命中 ${num(r.hits || 0)} 条`
+            + ` · 排除 ${num(r.excluded_tids || 0)} 帖 · 扫了 ${num(r.scanned || 0)} 层`;
+          toast('词表扫描完成');
+        } else {
+          st.textContent = '扫描失败：' + (j.error || j.state);
+          toast('词表扫描失败', true);
+        }
+        loadKeywords();
+      } catch (_) { /* 轮询失败不打断，下一拍再试 */ }
+    }, 1500);
+  } catch (e) { toast(e.message, true); }
+}
+
+$('#btn-kw-add').onclick = async () => {
+  const word = $('#kw-word').value.trim();
+  if (!word) { toast('先写一个词', true); return; }
+  try {
+    await api('/api/keywords', {
+      method: 'POST',
+      body: JSON.stringify({
+        word: word, kind: $('#kw-kind').value,
+        parent: $('#kw-parent').value.trim(), note: $('#kw-note').value.trim(),
+      }),
+    });
+    $('#kw-word').value = ''; $('#kw-parent').value = ''; $('#kw-note').value = '';
+    toast('已加词：' + word);
+    loadKeywords();
+  } catch (e) { toast(e.message, true); }
+};
+$('#btn-kw-scan').onclick = runKwScan;
+$('#kw-hits-prev').onclick = () => loadKwHits(kwState.hitsKid, kwState.hitsPage - 1);
+$('#kw-hits-next').onclick = () => loadKwHits(kwState.hitsKid, kwState.hitsPage + 1);
+
+/* 表体内容会被整体替换 → 事件委托挂在容器上 */
+$('#t-keywords').addEventListener('click', async ev => {
+  const h = ev.target.closest('[data-kw-hits]');
+  const t = ev.target.closest('[data-kw-toggle]');
+  const d = ev.target.closest('[data-kw-del]');
+  try {
+    if (h) { loadKwHits(h.dataset.kwHits, 0); return; }
+    if (t) {
+      const on = t.dataset.on !== '1';
+      await api(`/api/keywords/${t.dataset.kwToggle}/enabled`, {
+        method: 'POST', body: JSON.stringify({ enabled: on }),
+      });
+      toast(on ? '已启用（下次扫描生效）' : '已停用（下次扫描生效）');
+      loadKeywords();
+      return;
+    }
+    if (d) {
+      if (!confirm('删掉这个词？它的命中记录也会一起删。')) return;
+      await api('/api/keywords/' + d.dataset.kwDel, { method: 'DELETE' });
+      toast('已删除');
+      loadKeywords();
+    }
+  } catch (e) { toast(e.message, true); }
+});
 
 /* ------------------------------------------------------------------ 启动 */
 window.addEventListener('unhandledrejection', ev => {

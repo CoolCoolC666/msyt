@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""一次性验证：在**真库**上真跑一次导出，看 28 列与内容。"""
+"""一次性验证：在**真库**上真跑一次导出，看 29 列与内容。"""
 import csv
 import os
 import sys
@@ -24,7 +24,7 @@ with open(OUT, "r", encoding="utf-8-sig", newline="") as f:
     rd = csv.reader(f)
     head = next(rd)
     print("列数 =", len(head))
-    print("新列 =", head[-5:])
+    print("新列 =", head[-6:])
     rows = []
     for i, r in enumerate(rd):
         if i < 3:
@@ -41,3 +41,4 @@ for r in rows[:2]:
     print("  核验结论   :", repr(d["核验结论"]))
     print("  候选池路径 :", d["候选池路径"])
     print("  系统诊断   :", d["系统诊断"][:60])
+    print("  词表命中   :", d["词表命中"][:80])

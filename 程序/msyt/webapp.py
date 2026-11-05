@@ -1501,6 +1501,102 @@ def api_review_get(request: Request, tid: int = 0) -> Dict[str, Any]:
     return {"ok": True, "stats": db.review_stats()}
 
 
+# ====================================================================== 词表
+#: ★ 2026-11-05 新增（优化报告 P1-1）：课件「建立『词表』，关键词设计」。
+#:
+#: 词表是**研究设计**，改它 = 改检索口径 → 只有管理员能改；
+#: 成员可以看词表、看命中，但不能改（界面与接口两道都收）。
+@app.get("/api/keywords")
+def api_keywords(request: Request) -> Dict[str, Any]:
+    """词表全表 + 命中统计。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    return {"ok": True, "items": db.list_keywords(),
+            "kinds": list(DB.KEYWORD_KINDS),
+            "kind_cn": DB.KEYWORD_KIND_CN}
+
+
+@app.post("/api/keywords")
+def api_keyword_add(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """加一个词（同一个词重复加 = 更新词类，不新增）。"""
+    m = require_admin(request)
+    db = get_db(_cfg())
+    try:
+        row = db.add_keyword(req.get("word") or "", req.get("kind") or "",
+                             parent=req.get("parent") or "",
+                             note=req.get("note") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 加词「{row['word']}」（{row['kind_cn']}）", task="")
+    return {"ok": True, "keyword": row}
+
+
+@app.post("/api/keywords/{kid}/enabled")
+def api_keyword_enabled(request: Request, kid: int,
+                        req: dict = Body(...)) -> Dict[str, Any]:
+    """启用 / 停用一个词（停用 = 不参与扫描，词表里还在）。"""
+    m = require_admin(request)
+    db = get_db(_cfg())
+    n = db.set_keyword_enabled(kid, bool(req.get("enabled", True)))
+    if not n:
+        raise HTTPException(404, "没有这个词")
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 切换词 #{kid} 启用={bool(req.get('enabled', True))}",
+             task="")
+    return {"ok": True, "id": kid, "enabled": bool(req.get("enabled", True))}
+
+
+@app.delete("/api/keywords/{kid}")
+def api_keyword_delete(request: Request, kid: int) -> Dict[str, Any]:
+    """删一个词（连它的命中记录一起删）。"""
+    m = require_admin(request)
+    db = get_db(_cfg())
+    n = db.delete_keyword(kid)
+    if not n:
+        raise HTTPException(404, "没有这个词")
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 删词 #{kid}", task="")
+    return {"ok": True, "removed": n}
+
+
+@app.get("/api/keywords/{kid}/hits")
+def api_keyword_hits(request: Request, kid: int,
+                     limit: int = Query(50, ge=1, le=500),
+                     offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    """某个词命中的帖子（分页）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    return {"ok": True, **db.keyword_hits(kid, limit=limit, offset=offset)}
+
+
+@app.post("/api/keywords/scan")
+def api_keyword_scan(request: Request) -> Dict[str, Any]:
+    """**后台**跑一次词表扫描（界面用这个）。
+
+    ★ 为什么后台：扫描要过全库楼层正文（近百万行），同步跑会让请求
+      一直挂着、页面看着像死了（与 2026-10-25「体检界面打开就卡」同理）。
+    """
+    m = require_admin(request)
+    for j in JOBS.list():
+        if j.get("kind") == "keywords" and j.get("state") == "running":
+            raise HTTPException(409, "已有一个词表扫描在跑，请等它跑完")
+    cfg = _cfg()
+    job = JOBS.create("keywords", {}, node="admin")
+    job.log("开始扫描词表：过全库楼层正文…（近百万行，耗时较长）")
+
+    def _run(j: Job) -> Dict[str, Any]:
+        db = get_db(cfg)
+        j.log("扫描中…")
+        r = db.scan_keywords()
+        j.log(f"扫描完成：{r.get('words')} 个词，命中 {r.get('hits')} 条，"
+              f"排除 {r.get('excluded_tids')} 帖，扫了 {r.get('scanned')} 层")
+        return r
+
+    JOBS.spawn(job, _run)
+    return {"job": job.to_dict(tail=0)}
+
+
 # ====================================================================== 认证 / 协作
 HUB = Hub()
 

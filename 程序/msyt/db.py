@@ -393,6 +393,38 @@ CREATE TABLE IF NOT EXISTS sample_review (
 );
 CREATE INDEX IF NOT EXISTS idx_review_verdict ON sample_review(verdict);
 
+-- ---------------------------------------------------------------- 词表
+--: ★ 2026-11-05 新增（优化报告 P1-1）：课件「建立『词表』，关键词设计」。
+--:
+--: 我们原来是**按 109 个部门目录采**的 → 全库零关键词召回，
+--: 采不到「跨部门的服务情境」（同一个「地铁晚点」出现在几个部门版块里，
+--: 按部门采集看不见）。词表是补这块的。
+--:
+--: 五类词（课件原表）：
+--:   核心词 / 主体词 / 事件问题词 / 扩展词 / 排除词
+--:
+--: ★ `kind='exclude'`（排除词）是**减**的：
+--:   命中排除词的帖子，从其他词的命中里**扣掉**
+--:   （课件举例「非本地同名地名」——「宁波」三字同名地点遍布全国）。
+CREATE TABLE IF NOT EXISTS keywords (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    word       TEXT NOT NULL UNIQUE,   -- 词本身（唯一）
+    kind       TEXT NOT NULL,          -- core/subject/issue/variant/exclude
+    parent     TEXT NOT NULL DEFAULT '',   -- 扩展词归属哪个核心词
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS keyword_hits (
+    keyword_id  INTEGER NOT NULL,
+    tid         INTEGER NOT NULL,
+    post_count  INTEGER NOT NULL DEFAULT 0,   -- 该帖里命中了几层
+    first_hit_at TEXT NOT NULL DEFAULT '',     -- 首次命中时间
+    PRIMARY KEY (keyword_id, tid)
+);
+CREATE INDEX IF NOT EXISTS idx_kh_kw ON keyword_hits(keyword_id);
+CREATE INDEX IF NOT EXISTS idx_kh_tid ON keyword_hits(tid);
+
 -- ---------------------------------------------------------------- FTS5
 CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
     title,
@@ -835,9 +867,164 @@ class DB:
                 "SELECT detail_warn FROM threads WHERE tid=?", (tid,)).fetchone()
         return (row["detail_warn"] or "") if row else ""
 
+    # ---------------------------------------------------------------- 词表
+    #: 五类词（课件原表）
+    KEYWORD_KINDS = ("core", "subject", "issue", "variant", "exclude")
+    #: 词类 → 中文名
+    KEYWORD_KIND_CN = {
+        "core": "核心词", "subject": "主体词", "issue": "事件/问题词",
+        "variant": "扩展词", "exclude": "排除词",
+    }
+
+    def add_keyword(self, word: str, kind: str, parent: str = "",
+                    note: str = "") -> Dict[str, Any]:
+        """加一个词。同一词只留一条（重复加是更新，不是新增）。"""
+        word = (word or "").strip()
+        if not word:
+            raise ValueError("词不能为空")
+        if kind not in self.KEYWORD_KINDS:
+            raise ValueError("词类只能是 %s" % (self.KEYWORD_KINDS,))
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO keywords(word,kind,parent,enabled,note,created_at) "
+                "VALUES(?,?,?,1,?,?) "
+                "ON CONFLICT(word) DO UPDATE SET kind=excluded.kind, "
+                "parent=excluded.parent, note=excluded.note, enabled=1",
+                (word, kind, (parent or "").strip(), (note or "").strip(), now))
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT * FROM keywords WHERE word=?", (word,)).fetchone()
+        d = dict(row)
+        # 与 list_keywords 返回结构一致（带中文词类名）
+        d["kind_cn"] = self.KEYWORD_KIND_CN.get(d["kind"], d["kind"])
+        return d
+
+    def list_keywords(self) -> List[Dict[str, Any]]:
+        """词表 + 命中统计（按词类分组顺序返回）。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT k.*, "
+                "(SELECT COUNT(*) FROM keyword_hits h WHERE h.keyword_id=k.id) AS hit_tids, "
+                "(SELECT COALESCE(SUM(post_count),0) FROM keyword_hits h "
+                " WHERE h.keyword_id=k.id) AS hit_posts "
+                "FROM keywords k ORDER BY k.kind, k.id").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["kind_cn"] = self.KEYWORD_KIND_CN.get(d["kind"], d["kind"])
+            out.append(d)
+        return out
+
+    def delete_keyword(self, kid: int) -> int:
+        """删一个词（连它的命中记录一起删）。"""
+        with self.lock:
+            self.conn.execute("DELETE FROM keyword_hits WHERE keyword_id=?", (int(kid),))
+            n = self.conn.execute("DELETE FROM keywords WHERE id=?", (int(kid),)).rowcount
+            self.conn.commit()
+        return n
+
+    def set_keyword_enabled(self, kid: int, enabled: bool) -> int:
+        """启用/停用一个词（停用 = 不参与扫描，但词表里还在）。"""
+        with self.lock:
+            n = self.conn.execute(
+                "UPDATE keywords SET enabled=? WHERE id=?",
+                (1 if enabled else 0, int(kid))).rowcount
+            self.conn.commit()
+        return n
+
+    def scan_keywords(self) -> Dict[str, Any]:
+        """**一次全表扫描 + 多词判定** → 写命中表。
+
+        ★ 为什么不用 N 次查询
+          实测（20 词）：N 次 LIKE 查询 13.3 s（纯 SQL）/ 35.2 s（含检索流程），
+          **一次扫描 2.4 s**（快 5.6 倍）。词表越大差距越大。
+
+        ★ 排除词是**减**的
+          命中排除词的帖子，从其他词的命中里扣掉
+          （课件举例「非本地同名地名」——「宁波」同名地点遍布全国）。
+        """
+        with self.lock:
+            kws = [(int(r["id"]), r["word"], r["kind"]) for r in self.conn.execute(
+                "SELECT id,word,kind FROM keywords WHERE enabled=1 ORDER BY id")]
+        if not kws:
+            return {"ok": True, "words": 0, "hits": 0, "scanned": 0}
+        exclude_words = [w for _, w, k in kws if k == "exclude"]
+        normal = [(i, w) for i, w, k in kws if k != "exclude"]
+
+        hits: Dict[str, Dict[int, int]] = {w: {} for _, w in normal}
+        exclude_tids: set = set()
+        scanned = 0
+        # ★ 全表扫描**不占写锁**（WAL 下读与写可以并发）——
+        #   早先整段都在 self.lock 里，扫描几十秒会把服务端的写操作全堵死
+        #   （核验台账、协作回传都写不进去）。
+        for tid, content in self.conn.execute(
+                "SELECT tid, content FROM posts WHERE pid>0"):
+            scanned += 1
+            if not content:
+                continue
+            for w in exclude_words:
+                if w in content:
+                    exclude_tids.add(int(tid))
+                    break
+            for _, w in normal:
+                c = content.count(w)
+                if c:
+                    hits[w][int(tid)] = c
+
+        # 扣掉被排除的帖子
+        for w in hits:
+            if exclude_tids:
+                hits[w] = {t: c for t, c in hits[w].items()
+                           if t not in exclude_tids}
+
+        # 落库：先清再写（扫描结果是这一次的快照）
+        rows = []
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        for kid, word, _kind in kws:
+            for tid, c in hits.get(word, {}).items():
+                rows.append((kid, tid, c, now))
+        with self.lock:
+            self.conn.execute("DELETE FROM keyword_hits")
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO keyword_hits"
+                "(keyword_id,tid,post_count,first_hit_at) VALUES(?,?,?,?)", rows)
+            self.conn.commit()
+        return {"ok": True, "words": len(kws), "hits": len(rows),
+                "scanned": scanned,
+                "excluded_tids": len(exclude_tids)}
+
+    def keyword_hits(self, kid: int, limit: int = 50, offset: int = 0
+                     ) -> Dict[str, Any]:
+        """某个词命中的帖子（分页）。"""
+        with self.lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM keyword_hits WHERE keyword_id=?",
+                (int(kid),)).fetchone()[0]
+            rows = self.conn.execute(
+                "SELECT h.tid, h.post_count, t.title, t.dept_name, t.state, "
+                "t.pub_time, t.detail_state "
+                "FROM keyword_hits h JOIN threads t ON t.tid=h.tid "
+                "WHERE h.keyword_id=? ORDER BY h.post_count DESC, h.tid DESC "
+                "LIMIT ? OFFSET ?", (int(kid), int(limit), int(offset))).fetchall()
+        return {"total": total, "items": [dict(r) for r in rows]}
+
+    def keyword_hit_words(self) -> Dict[int, List[str]]:
+        """{tid: 命中的词列表} —— 导出用（这是「查询词」在样本上的体现）。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT h.tid, k.word FROM keyword_hits h "
+                "JOIN keywords k ON k.id=h.keyword_id "
+                "WHERE k.kind<>'exclude' ORDER BY h.tid, k.word").fetchall()
+        out: Dict[int, List[str]] = {}
+        for r in rows:
+            out.setdefault(int(r["tid"]), []).append(r["word"])
+        return out
+
     # ---------------------------------------------------------------- 导出
-    #: 导出新增的 5 列（2026-11-05 · 优化报告 P0-2）
-    EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断"]
+    #: 导出新增的列（2026-11-05 · 优化报告 P0-2；2026-11-05 再加「词表命中」P1-1）
+    EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断",
+                         "词表命中"]
 
     def export_csv(self, path: str) -> int:
         """导出正式样本 CSV（**交付物**），返回导出行数。
@@ -888,6 +1075,8 @@ class DB:
                 "SELECT tid, content, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY pid) rn "
                 "FROM posts WHERE pid>0) WHERE rn=1"):
             first_content[int(tid)] = content
+        # 词表命中（优化报告 P1-1）：一次查完 → {tid: [命中的词]}
+        kw_words = self.keyword_hit_words()
 
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
@@ -912,6 +1101,7 @@ class DB:
                     (f"{verdict}｜{reason}" if verdict else ""),
                     path_desc,
                     d.get("_warn") or "",
+                    " / ".join(kw_words.get(tid) or []),
                 ])
         return len(rows)
 

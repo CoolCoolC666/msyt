@@ -13,15 +13,15 @@
     <span class="logo">e</span>
     <div>
       <h1>民生e点通 · 舆情采集系统</h1>
-      <p class="sub">舆情采集器 <span class="dim">/</span> 只读采集 <span class="dim">/</span> 本地数据，不对站方做任何写操作</p>
+      <p class="sub">数据来源：天一论坛民生e点通（<b>单一信源</b>） <span class="dim">/</span> 舆情采集器 <span class="dim">/</span> 只读采集 <span class="dim">/</span> 本地数据，不对站方做任何写操作</p>
     </div>
   </div>
   <div class="topmeta">
     <div class="chip" id="chip-db"><span class="dot" id="dot"></span><span id="dbtext">连接中…</span></div>
-    <div class="chip"><b id="m-threads">–</b><span class="dim">帖</span></div>
-    <div class="chip"><b id="m-posts">–</b><span class="dim">楼层</span></div>
-    <div class="chip"><b id="m-done">–</b><span class="dim">已采详情</span></div>
-    <div class="chip"><b id="m-pending">–</b><span class="dim">待采</span></div>
+    <div class="chip" title="口径：本站已入库的帖子数（含正文受限、只存标题的）"><b id="m-threads">–</b><span class="dim">帖</span></div>
+    <div class="chip" title="口径：入库的楼层记录条数（正文受限的帖子也有标记行）"><b id="m-posts">–</b><span class="dim">楼层</span></div>
+    <div class="chip" title="口径：正文已采到、可做内容分析的帖子"><b id="m-done">–</b><span class="dim">已采详情</span></div>
+    <div class="chip" title="口径：站方还有页没翻完的帖子"><b id="m-pending">–</b><span class="dim">待采</span></div>
     <button class="chip link hidden" id="btn-pw-top" title="修改自己的登录密码">改密码</button>
     <button class="chip link hidden" id="btn-logout-top" title="退出登录">退出</button>
     <a class="chip link" href="/docs" target="_blank">API 文档</a>
@@ -31,6 +31,7 @@
 <nav class="tabs" id="tabs">
   <button data-tab="overview" class="active">总览</button>
   <button data-tab="threads">检索与浏览</button>
+  <button data-tab="keywords">词表</button>
   <button data-tab="collect">采集与协作</button>
   <button data-tab="integrity">完整性体检</button>
   <button data-tab="log">采集日志</button>
@@ -42,30 +43,68 @@
 <section class="panel" id="tab-overview">
   <div class="cards" id="ov-cards"></div>
 
+  <div class="card" id="ov-boundary">
+    <h3>结论边界</h3>
+    <p class="hint">这个系统<strong>能</strong>说明什么、<strong>不能</strong>说明什么 —— 先看这张卡，再看数字。</p>
+    <div class="tablewrap"><table id="ov-boundary-tb">
+      <thead><tr><th>我们<b>能</b>说什么</th><th>我们<b>不能</b>说什么</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>天一论坛民生e点通上，<b>哪些部门</b>在什么时间<b>受理/回复</b>了<b>哪些民生诉求</b></td>
+          <td>宁波居民<b>总体意见比例</b>、<b>总体态度</b></td>
+        </tr>
+        <tr>
+          <td>站方<b>公开可见</b>范围内的诉求<b>分类</b>与<b>办理状态</b></td>
+          <td>一般<b>社交讨论热度</b>（本平台不是社交平台）</td>
+        </tr>
+        <tr>
+          <td>站方<b>自报</b>的历史留言总量与受理总量（<b>须标明是站方口径</b>）</td>
+          <td>本站采集量 = 舆情总量（两者差 5 个数量级）</td>
+        </tr>
+        <tr>
+          <td>已采集样本的<b>完整性</b>（pid 集合已对齐站方实测）</td>
+          <td>站方<b>没公开</b>的历史帖内容（受限帖只记「存在且不可见」）</td>
+        </tr>
+      </tbody>
+    </table></div>
+    <p class="hint" style="margin-top:10px">
+      课件对本店那一行的原话：<b>天一论坛民生e点通：适合观察民生诉求、类别、公开受理/回复状态；
+      不宜直接推断一般社交讨论热度。</b><br>
+      三条必须一起说的偏差：<b>① 单一信源</b>（只有这一个平台）；
+      <b>② 可见性偏差</b>（站方不公开的历史帖正文，记为「存在且不可见」）；
+      <b>③ 计数口径偏差</b>（站方列表页的回复数删楼后不跟着减）。
+    </p>
+  </div>
+
   <div class="grid2">
     <div class="card">
       <h3>帖子类别分布</h3>
+      <p class="hint">口径：<b>已采集到详情</b>的帖子的站方分类（站方分好我们照搬）。</p>
       <div id="ov-category" class="bars"></div>
     </div>
     <div class="card">
       <h3>受理状态分布</h3>
+      <p class="hint">口径：站方给的受理状态；<b>空 = 站方未标</b>，不是「没人管」。</p>
       <div id="ov-state" class="bars"></div>
     </div>
     <div class="card">
       <h3>部门分组</h3>
+      <p class="hint">口径：站方标注的<b>办理部门</b>；未分组的单列一类。</p>
       <div id="ov-group" class="bars"></div>
     </div>
     <div class="card">
       <h3>时效灯</h3>
-      <div id="ov-light" class="bars"></div>
       <p class="hint">时效灯只对「已回复」的帖存在，空值记为未点亮。</p>
+      <div id="ov-light" class="bars"></div>
     </div>
     <div class="card">
       <h3>区县市</h3>
+      <p class="hint">口径：站方标的区县市；跨区问题多在「其他/未标」。</p>
       <div id="ov-district" class="bars"></div>
     </div>
     <div class="card">
       <h3>站方自报统计</h3>
+      <p class="hint">口径：<b>站方自报的全站历史总量</b>，<b>不是本站采集量</b>（两者差 5 个数量级）。</p>
       <div id="ov-site" class="kv"></div>
     </div>
   </div>
@@ -127,6 +166,37 @@
         <option value="50">50 条/页</option>
         <option value="100">100 条/页</option>
       </select>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 词表 ================= -->
+<section class="panel hidden" id="tab-keywords">
+  <div class="card">
+    <h3>词表（关键词设计）</h3>
+    <p class="hint">五类词：核心词 / 主体词 / 事件·问题词 / 扩展词 / <b>排除词</b>。
+      <b>排除词是「减」的</b>——命中排除词的帖子会从其他词的命中里<b>扣掉</b>
+      （课件举例：非本地的同名地名，「宁波」同名地点遍布全国）。
+      扫描是<b>一次全表扫描 + 多词判定</b>，不是每个词查一次。</p>
+    <div class="row" id="kw-admin-row">
+      <input id="kw-word" placeholder="词（2 字中文词 FTS 失效，命中走全表扫描）" autocomplete="off">
+      <select id="kw-kind"></select>
+      <input id="kw-parent" placeholder="父词（可选）" autocomplete="off">
+      <input id="kw-note" placeholder="备注（可选）" autocomplete="off">
+      <button class="primary" id="btn-kw-add">加词</button>
+      <button class="ghost" id="btn-kw-scan">扫描全库</button>
+      <span id="kw-scan-status" class="dim"></span>
+    </div>
+    <div class="tablewrap"><table id="t-keywords"></table></div>
+  </div>
+
+  <div class="card">
+    <h3>命中帖子 <span class="dim" id="kw-hits-title"></span></h3>
+    <div class="tablewrap"><table id="t-kwhits"></table></div>
+    <div class="pager">
+      <button class="ghost" id="kw-hits-prev">‹ 上一页</button>
+      <span id="kw-hits-info">—</span>
+      <button class="ghost" id="kw-hits-next">下一页 ›</button>
     </div>
   </div>
 </section>

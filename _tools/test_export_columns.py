@@ -33,7 +33,7 @@ OLD_COLS = ["tid", "title", "url", "pub_time", "pub_day", "dept_name",
             "light_code", "light_name", "author", "replies", "views",
             "detail_state", "posts_n", "chars", "first_post_id", "last_post_id",
             "pages_total", "full_text"]
-NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断"]
+NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断", "词表命中"]
 
 
 def check(cond: bool, msg: str) -> None:
@@ -94,6 +94,12 @@ def main() -> int:
         (1001, "纳入", "诉求明确、已受理", "", "2026-11-05", "人工", now))
     db.conn.commit()
 
+    # ---- 词表（P1-1）：先造词表并扫一次，导出里才有「词表命中」 ----
+    db.add_keyword("无障碍通道", "issue", note="具体诉求")
+    db.add_keyword("换乘", "issue", note="具体诉求")
+    db.add_keyword("垃圾清运", "subject")
+    db.scan_keywords()
+
     # ---- 跑真代码 ----
     out = os.path.join(tmp, "out.csv")
     n = db.export_csv(out)
@@ -110,12 +116,12 @@ def main() -> int:
     for c in OLD_COLS:
         check(c in head, f"旧列 {c} 还在")
 
-    # ---- ② 新增 5 列 ----
-    print("\n--- ② 新增 5 列 ---")
+    # ---- ② 新增 6 列 ----
+    print("\n--- ② 新增 6 列 ---")
     for c in NEW_COLS:
         check(c in head, f"新列 {c} 在")
     check(head[len(OLD_COLS):] == NEW_COLS, "新列追加在末尾、顺序正确")
-    check(len(head) == 28, f"总列数 = 28（实得 {len(head)}）")
+    check(len(head) == 29, f"总列数 = 29（实得 {len(head)}）")
 
     # ---- ③ 每列都有内容 ----
     print("\n--- ③ 内容逐列核对（取 tid=1001 那行）---")

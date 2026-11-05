@@ -108,19 +108,24 @@ def one_round(args, cfg) -> int:
     def write_tid(tid: int, items: list) -> None:
         """把一个帖的结果写库，**提交之后才**记进度。
 
-        ★ 提交按批做（每 100 帖一次）—— 每帖一次 commit 在 19 万帖上太慢；
-          批提交则最多丢 100 帖的进度（下次重跑即可）。
+        ★ 为什么**每帖一提交**（2026-11-05 改，原为每 100 帖一提交）
+          Python 的 sqlite3 默认开隐式事务：不 commit 就一直占着**写锁**。
+          每 100 帖才提交 → 写锁被占住几十秒 → 服务端任何写操作
+          （词表扫描落库、导出、核验台账）都会等到 busy_timeout 超时
+          → 实测「database is locked」**持续 30 秒也等不到**。
+          每帖一提交：写锁只占几毫秒，别人的写随时能插进来；
+          代价是 commit 次数变多（WAL 下每次几毫秒，总代价可忽略）。
         """
         if items:
             conn.executemany(
                 "UPDATE posts SET post_time=?, post_ts=? "
                 "WHERE pid=? AND (post_time IS NULL OR post_time='')",
                 [(t, ts, pid) for pid, t, ts in items])
+        conn.commit()                             # ★ 先提交
         prog_buf.append(tid)
-        if len(prog_buf) >= 100:
-            conn.commit()                     # ★ 先提交
+        if len(prog_buf) >= 1:
             fh.write("".join("%d\n" % t for t in prog_buf))
-            fh.flush()                        # ★ 再记进度
+            fh.flush()                            # ★ 再记进度
             prog_buf.clear()
 
     def worker() -> None:
