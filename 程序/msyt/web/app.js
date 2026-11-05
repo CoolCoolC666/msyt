@@ -249,7 +249,11 @@ $$('#tabs button').forEach(btn => {
     $$('.panel').forEach(p => p.classList.add('hidden'));
     $('#tab-' + btn.dataset.tab).classList.remove('hidden');
     if (btn.dataset.tab === 'overview') loadOverview();
-    if (btn.dataset.tab === 'threads') { if (!state.meta) await loadMeta(); loadThreads(); }
+    if (btn.dataset.tab === 'threads') {
+      if (!state.meta) await loadMeta();
+      loadThreads();
+      loadTagOptions();
+    }
     if (btn.dataset.tab === 'keywords') loadKeywords();
     if (btn.dataset.tab === 'collect') {
       if (!state.token) { showLogin('请先登录'); return; }
@@ -335,6 +339,7 @@ async function loadOverview() {
   barChart($('#ov-group'), st.by_group);
   barChart($('#ov-light'), st.by_light);
   barChart($('#ov-district'), st.by_district);
+  renderTagOverview();
 
   const ss = st.site_stats || {};
   $('#ov-site').innerHTML = ss.total_msgs ? `
@@ -520,7 +525,7 @@ function filters() {
   //   旧写法 g('category') 找的是 #category → 永远是 null → **所有下拉筛选
   //   被静默丢掉**，表现就是「下拉框选了条件、结果还是全量」（2026-10-24 用户实测）。
   ['scope', 'sort', 'category', 'state', 'mailbox', 'group', 'district',
-   'dept', 'light'].forEach(k => {
+   'dept', 'light', 'tag'].forEach(k => {
     const v = g('f-' + k);
     if (v) p.set(k, v);
   });
@@ -530,6 +535,95 @@ function filters() {
   p.set('offset', (state.page - 1) * state.limit);
   return p;
 }
+
+/* ---------------- 三维标签（优化报告 P2-2） ----------------
+   三个维度：关系 / 性质·过程 / 影响。颜色按维度分，别让用户猜。 */
+const TAG_DIM_CN = { relation: '关系', process: '过程', impact: '影响' };
+
+function tagCls(dim, tag) {
+  if (tag === '跨部门重复') return 'warn';      // 最值得注意的一个 → 红
+  if (dim === 'relation') return 'green';
+  if (dim === 'process') return 'yellow';
+  return 'teal';
+}
+
+function tagChips(tags) {
+  if (!tags || !tags.length) return '<span class="dim">—</span>';
+  return tags.map(t => {
+    const dim = t.dim || '';
+    const label = t.tag || '';
+    return '<span class="badge ' + tagCls(dim, label) + '" title="'
+      + esc(TAG_DIM_CN[dim] || dim) + '">' + esc(label) + '</span>';
+  }).join(' ');
+}
+
+let TAG_STATS = null;
+
+async function loadTagOptions() {
+  const sel = $('#f-tag');
+  if (!sel) return;
+  try {
+    const d = await api('/api/tags/stats');
+    TAG_STATS = d.dims || {};
+    const groups = [];
+    for (const dim of Object.keys(TAG_DIM_CN)) {
+      const tags = TAG_STATS[dim] || {};
+      const names = Object.keys(tags);
+      if (!names.length) continue;
+      groups.push('<optgroup label="' + esc(TAG_DIM_CN[dim]) + '">' + names
+        .map(n => '<option value="' + esc(n) + '">' + esc(n) + '（'
+          + num(tags[n]) + '）</option>').join('') + '</optgroup>');
+    }
+    sel.innerHTML = '<option value="">（全部标签）</option>' + groups.join('');
+  } catch (e) { /* 没标签也不影响检索 */ }
+}
+
+function renderTagOverview() {
+  const box = $('#ov-tags');
+  if (!box) return;
+  if (!TAG_STATS) {
+    api('/api/tags/stats').then(x => {
+      TAG_STATS = x.dims || {};
+      renderTagOverview();
+    }).catch(() => {});
+    return;
+  }
+  const parts = [];
+  for (const dim of Object.keys(TAG_DIM_CN)) {
+    const tags = TAG_STATS[dim] || {};
+    const names = Object.keys(tags).sort((a, b) => tags[b] - tags[a]);
+    if (!names.length) continue;
+    parts.push('<div class="secttl">' + esc(TAG_DIM_CN[dim]) + '</div>' + names.map(n =>
+      '<div class="tagrow"><span class="badge ' + tagCls(dim, n) + '">'
+      + esc(n) + '</span><span class="num">' + num(tags[n]) + '</span></div>').join(''));
+  }
+  box.innerHTML = parts.join('') || '<p class="hint">还没有标签（点「重算标签」生成）</p>';
+}
+
+
+/* ★ 重算三维标签（管理员）：后台跑，页面不挂死 */
+$('#btn-tags-compute').onclick = async () => {
+  try {
+    const d = await api('/api/tags/compute', { method: 'POST' });
+    const jid = d.job.id;
+    toast('正在后台重算标签…（全库 60 万帖，约十几秒）');
+    const timer = setInterval(async () => {
+      try {
+        const j = await api('/api/jobs/' + jid);
+        if (j.state === 'running') return;
+        clearInterval(timer);
+        if (j.state === 'done') {
+          toast('标签重算完成：' + num((j.result || {}).tags) + ' 个标签');
+          TAG_STATS = null;
+          renderTagOverview();
+          loadTagOptions();
+        } else {
+          toast('标签重算失败：' + (j.error || j.state), true);
+        }
+      } catch (_) { clearInterval(timer); }
+    }, 2000);
+  } catch (e) { toast(e.message, true); }
+};
 
 /** 当前生效的筛选条件（给人看的「我现在在筛什么」）。 */
 function activeFilters() {
@@ -609,7 +703,7 @@ async function loadThreads() {
   const rows = res.items || [];
   $('#t-threads').innerHTML = `
     <thead><tr><th>TID</th><th>标题</th><th>部门</th><th>类别</th><th>状态</th>
-    <th>时效灯</th><th>时间</th><th>回复</th><th>详情</th></tr></thead>
+    <th>时效灯</th><th>时间</th><th>回复</th><th>详情</th><th>标签</th></tr></thead>
     <tbody>${rows.length ? rows.map(r => `
       <tr class="clickable" data-tid="${r.tid}">
         <td class="num sub2">${r.tid}</td>
@@ -626,8 +720,9 @@ async function loadThreads() {
         <td class="nowrap sub2">${esc(r.pub_time || '')}</td>
         <td class="num">${num(r.replies)}</td>
         <td class="nowrap">${detailBadge(r.detail_state)}</td>
+        <td class="tagcell">${tagChips(r.tags)}</td>
       </tr>`).join('')
-      : '<tr><td colspan="9" class="hint">没有命中的帖子</td></tr>'}</tbody>`;
+      : '<tr><td colspan="10" class="hint">没有命中的帖子</td></tr>'}</tbody>`;
 
   $$('#t-threads tr.clickable').forEach(tr => {
     tr.onclick = () => openThread(tr.dataset.tid);

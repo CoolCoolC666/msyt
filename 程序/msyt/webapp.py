@@ -729,7 +729,7 @@ def api_threads(
     scope: str = Query("all", pattern="^(thread|post|all)$"),
     dept: str = "", group: str = "", district: str = "",
     category: str = "", state: str = "", mailbox: str = "", light: str = "",
-    date_from: str = "", date_to: str = "",
+    date_from: str = "", date_to: str = "", tag: str = "",
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     sort: str = "time_desc",
@@ -737,10 +737,79 @@ def api_threads(
     _require_member(request)
     cfg = _cfg()
     db = get_db(cfg)
-    return db.search(q, scope=scope, dept=dept, group=group, district=district,
+    res = db.search(q, scope=scope, dept=dept, group=group, district=district,
                      category=category, state=state, mailbox=mailbox, light=light,
-                     date_from=date_from, date_to=date_to, limit=limit,
+                     date_from=date_from, date_to=date_to, tag=tag,
+                     limit=limit,
                      offset=offset, sort=sort)
+    # ★ 行内显示三维标签（优化报告 P2-2）：**只查当页这些 tid**，
+    #   别把全库两百多万条标签拉出来。
+    items = res.get("items") or []
+    if items:
+        tids = [int(it["tid"]) for it in items]
+        marks: Dict[int, List[Dict[str, str]]] = {}
+        qm = ",".join("?" * len(tids))
+        for r in db.conn.execute(
+                "SELECT tid, dim, tag FROM thread_dim_tags WHERE tid IN ("
+                + qm + ") ORDER BY tid, dim, tag", tids):
+            marks.setdefault(int(r["tid"]), []).append(
+                {"dim": r["dim"], "tag": r["tag"]})
+        for it in items:
+            it["tags"] = marks.get(int(it["tid"]), [])
+    return res
+
+
+# ====================================================================== 三维标签
+#: ★ 2026-11-05 新增（优化报告 P2-2）：课件「关系 / 性质·过程 / 影响」三个分类角度。
+#:   这三个角度的信号**库里早就有**（站方部门分组 / 受理流程时间线 / 回复数与跨部门同名），
+#:   我们把它们抽成了标签（表 thread_dim_tags，与站方原生的 thread_tags 不是一回事）。
+@app.get("/api/tags/stats")
+def api_tags_stats(request: Request) -> Dict[str, Any]:
+    """三个维度各标签的帖数（界面做筛选与分布用）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    return {"ok": True, "dims": db.tag_stats(),
+            "order": list(db.TAG_DIMS) if hasattr(db, "TAG_DIMS") else ["relation", "process", "impact"]}
+
+
+@app.get("/api/tags")
+def api_tags_for(request: Request, tid: int = 0) -> Dict[str, Any]:
+    """某个帖的三维标签（tid=0 → 全库统计）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    if not tid:
+        return {"ok": True, "stats": db.tag_stats()}
+    rows = db.conn.execute(
+        "SELECT dim, tag FROM thread_dim_tags WHERE tid=? ORDER BY dim, tag",
+        (int(tid),)).fetchall()
+    return {"ok": True, "tid": int(tid),
+            "items": [{"dim": r["dim"], "tag": r["tag"]} for r in rows]}
+
+
+@app.post("/api/tags/compute")
+def api_tags_compute(request: Request) -> Dict[str, Any]:
+    """**后台**重算全库三维标签（管理员专属）。
+
+    ★ 为什么后台：一次要扫 60 万帖 + 55 万条流程记录，同步跑会让页面挂着。
+    """
+    m = require_admin(request)
+    for j in JOBS.list():
+        if j.get("kind") == "tags" and j.get("state") == "running":
+            raise HTTPException(409, "已有一个标签计算在跑，请等它跑完")
+    cfg = _cfg()
+    job = JOBS.create("tags", {}, node="admin")
+    job.log("开始计算三维标签：扫全库帖子 + 受理流程…（60 万帖量级）")
+
+    def _run(j: Job) -> Dict[str, Any]:
+        db = get_db(cfg)
+        j.log("计算中…")
+        r = db.compute_tags()
+        j.log("完成：%s 帖，%s 个标签，用时 %s 秒"
+              % (r.get("posts"), r.get("tags"), r.get("elapsed")))
+        return r
+
+    JOBS.spawn(job, _run)
+    return {"job": job.to_dict(tail=0)}
 
 
 @app.get("/api/threads/{tid}")

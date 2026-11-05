@@ -43,6 +43,14 @@
 <section class="panel" id="tab-overview">
   <div class="cards" id="ov-cards"></div>
 
+  <div class="card">
+    <h3>三维标签分布</h3>
+    <p class="hint">关系 / 性质·过程 / 影响 —— 课件的三个分类角度。
+      标签由库里的现成信号算出来（站方部门分组、受理流程时间线、回复数与跨部门同名），
+      <b>不是</b>模型判的。<button class="ghost tiny" id="btn-tags-compute">重算标签</button></p>
+    <div id="ov-tags"></div>
+  </div>
+
   <div class="card" id="ov-boundary">
     <h3>结论边界</h3>
     <p class="hint">这个系统<strong>能</strong>说明什么、<strong>不能</strong>说明什么 —— 先看这张卡，再看数字。</p>
@@ -142,6 +150,7 @@
       <select id="f-district"></select>
       <select id="f-dept"></select>
       <select id="f-light" data-dict="lights"></select>
+      <select id="f-tag" title="三维标签（关系/过程/影响）"></select>
       <input id="f-from" type="date" title="起始日期">
       <input id="f-to" type="date" title="截止日期">
       <button class="primary" id="btn-search">检索</button>

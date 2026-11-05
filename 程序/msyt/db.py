@@ -325,6 +325,22 @@ CREATE TABLE IF NOT EXISTS assist_conflicts (
 CREATE INDEX IF NOT EXISTS idx_ac_tid ON assist_conflicts(tid);
 CREATE INDEX IF NOT EXISTS idx_ac_code ON assist_conflicts(task_code);
 
+-- ---------------------------------------------------------------- 三维标签（我们派生的）
+-- ★ 与上面那张 thread_tags **不是一回事**，别混：
+--   thread_tags      = 站方**给的**分类标签（dept/source/light/category/state/mailbox，310 万行）
+--   thread_dim_tags  = 我们**派生**的三维标签（关系 / 性质·过程 / 影响）
+-- 课件的四个分类角度：内容/领域（= 站方部门分类，已有）
+--   + 关系 + 性质·过程 + 影响。后三个角度的信号库里早就有，只是没抽成标签。
+-- ★ 标签是**多值**的：一个帖可以同时有「官民」「医患」「跨部门重复」。
+CREATE TABLE IF NOT EXISTS thread_dim_tags (
+    tid  INTEGER,
+    dim  TEXT,          -- relation | process | impact
+    tag  TEXT,          -- 标签值（带前缀，如「阶段：已受理」「时长：3-7天」）
+    PRIMARY KEY (tid, dim, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_tdt_dim_tag ON thread_dim_tags(dim, tag);
+CREATE INDEX IF NOT EXISTS idx_tdt_tid ON thread_dim_tags(tid);
+
 -- ---------------------------------------------------------------- 启动票据
 -- ★ 成员端的启动包是**网站实时生成并下载**的，里面不带密码，只带一张
 --   **一次性票据**：agent 启动时用它换 JWT（用完即焚、限时）。
@@ -1042,7 +1058,7 @@ class DB:
     # ---------------------------------------------------------------- 导出
     #: 导出新增的列（2026-11-05 · 优化报告 P0-2；2026-11-05 再加「词表命中」P1-1）
     EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断",
-                         "词表命中"]
+                         "词表命中", "三维标签"]
 
     def export_csv(self, path: str) -> int:
         """导出正式样本 CSV（**交付物**），返回导出行数。
@@ -1059,6 +1075,7 @@ class DB:
         """
         import csv
         from .summarize import make_summary
+        from .tags import tag_map_text
 
         rows = self.conn.execute(
             "SELECT t.tid,t.title,t.url,t.pub_time,t.pub_day,t.dept_name,t.dept_group,"
@@ -1095,6 +1112,8 @@ class DB:
             first_content[int(tid)] = content
         # 词表命中（优化报告 P1-1）：一次查完 → {tid: [命中的词]}
         kw_words = self.keyword_hit_words()
+        # 三维标签（优化报告 P2-2）：一次查完 → {tid: 标签1 / 标签2}
+        dim_tags = tag_map_text(self.conn)
 
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
@@ -1120,6 +1139,7 @@ class DB:
                     path_desc,
                     d.get("_warn") or "",
                     " / ".join(kw_words.get(tid) or []),
+                    dim_tags.get(tid) or "",
                 ])
         return len(rows)
 
@@ -1178,6 +1198,24 @@ class DB:
             rows = self.conn.execute(
                 "SELECT * FROM sample_review").fetchall()
         return {int(r["tid"]): dict(r) for r in rows}
+
+    # ---------------------------------------------------------------- 三维标签
+    # ★ 规则全在 msyt/tags.py（好复核、好写闸），这里只做薄封装。
+    def compute_tags(self) -> Dict[str, Any]:
+        from .tags import compute_tags
+        return compute_tags(self.conn)
+
+    def tag_map(self) -> Dict[int, List[str]]:
+        from .tags import tag_map
+        return tag_map(self.conn)
+
+    def tag_stats(self) -> Dict[str, Dict[str, int]]:
+        from .tags import tag_stats
+        return tag_stats(self.conn)
+
+    def tag_map_text(self) -> Dict[int, str]:
+        from .tags import tag_map_text
+        return tag_map_text(self.conn)
 
     def review_stats(self) -> Dict[str, int]:
         """按结论分类计数（含「未复核」）。"""
@@ -2215,6 +2253,7 @@ class DB:
                dept: str = "", group: str = "", district: str = "",
                category: str = "", state: str = "", mailbox: str = "",
                light: str = "", date_from: str = "", date_to: str = "",
+               tag: str = "",
                limit: int = 20, offset: int = 0, sort: str = "time_desc",
                min_fts_chars: int = 3, op: str = "AND",
                tokenize: bool = False) -> Dict[str, Any]:
@@ -2229,6 +2268,12 @@ class DB:
         where, args = self._thread_filters(
             dept, group, district, category, state, mailbox, light,
             date_from, date_to)
+        # ★ 三维标签筛选（优化报告 P2-2）：子查询按标签取 tid，
+        #   走 thread_dim_tags 的 (dim,tag) 索引。
+        if tag:
+            where.append("t.tid IN (SELECT tid FROM thread_dim_tags "
+                         "WHERE tag=?)")
+            args.append(tag)
         wsql = (" AND ".join(where)) if where else "1=1"
 
         q = (q or "").strip()

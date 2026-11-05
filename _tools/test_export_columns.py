@@ -33,7 +33,7 @@ OLD_COLS = ["tid", "title", "url", "pub_time", "pub_day", "dept_name",
             "light_code", "light_name", "author", "replies", "views",
             "detail_state", "posts_n", "chars", "first_post_id", "last_post_id",
             "pages_total", "full_text"]
-NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断", "词表命中"]
+NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断", "词表命中", "三维标签"]
 
 
 def check(cond: bool, msg: str) -> None:
@@ -100,6 +100,9 @@ def main() -> int:
     db.add_keyword("垃圾清运", "subject")
     db.scan_keywords()
 
+    # 三维标签（P2-2）：先算一次，导出里才有这一列
+    db.compute_tags()
+
     # ---- 跑真代码 ----
     out = os.path.join(tmp, "out.csv")
     n = db.export_csv(out)
@@ -117,11 +120,11 @@ def main() -> int:
         check(c in head, f"旧列 {c} 还在")
 
     # ---- ② 新增 6 列 ----
-    print("\n--- ② 新增 6 列 ---")
+    print("\n--- ② 新增 7 列 ---")
     for c in NEW_COLS:
         check(c in head, f"新列 {c} 在")
     check(head[len(OLD_COLS):] == NEW_COLS, "新列追加在末尾、顺序正确")
-    check(len(head) == 29, f"总列数 = 29（实得 {len(head)}）")
+    check(len(head) == 30, f"总列数 = 30（实得 {len(head)}）")
 
     # ---- ③ 每列都有内容 ----
     print("\n--- ③ 内容逐列核对（取 tid=1001 那行）---")
@@ -134,6 +137,9 @@ def main() -> int:
     check("dept:512" in row["候选池路径"] and "row" in row["候选池路径"],
           f"候选池路径 = {row['候选池路径']}")
     check("楼层号缺口" in row["系统诊断"], f"系统诊断 = {row['系统诊断']}")
+    check("热度：中" in row["三维标签"],
+          f"三维标签 = {row['三维标签']!r}")
+    check("单部门" in row["三维标签"], "三维标签含影响维度（单部门）")
     # ⚠ `full_text` 的楼层分隔符是**字面两个字符 `\n`**（SQLite 不解析
     #   字符串里的转义）—— 这是**沿用下来的原有行为**，本次不改（改了旧列内容就变了）。
     check(row["full_text"].count("\\n") == 2,
