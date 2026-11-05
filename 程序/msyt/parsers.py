@@ -518,6 +518,17 @@ _PG_BLOCK_RE = re.compile(r'<div class="pg">(.{0,3000}?)</div>', re.S)
 _PG_HREF_RE = re.compile(r'href="[^"]*[?&]page=(\d+)"')
 #: 楼层号标签：楼主 / <em>5</em><sup>#</sup> / 来自 2# / 顶来自 2#
 _FLOOR_RE = re.compile(r"(\d+)\s*[#楼]")
+#: 楼层发帖时间：站方原文形如「发表于 2025-5-23 19:55来自浙江」
+#:
+#: ★★ 2026-11-05 修正：**月日不补零**
+#:   站方写 `2025-5-23` / `2026-9-2`（单数字月/日），
+#:   旧正则要求 `[0-9]{2}-[0-9]{2}-[0-9]{2}` → **匹配失败** →
+#:   全库 482,266 个楼层（86.1%）的发帖时间被丢掉。
+#:   （实测 tid=8236013 第 1 页：站方 16 个 `authorposton` 全在，正则只中 0 个。）
+#:   → 改成接受 1~2 位，输出统一补零成 `YYYY-MM-DD HH:MM`
+#:     （与存量 77,933 条的格式一致，`to_ts` 也才吃得下）。
+_POST_TIME_RE = re.compile(
+    r"发表于\s*([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})\s+([0-9]{1,2}):([0-9]{2})")
 
 
 def parse_total_pages(html: str) -> int:
@@ -608,9 +619,11 @@ def parse_thread_page(html: str, tid: int = 0, page_no: int = 1) -> ThreadPage:
         pid = int(pid_s)
         fm = tp.floors.setdefault(pid, FloorMeta(pid=pid))
         txt = el.get_text(" ", strip=True)
-        mt2 = re.search(r"发表于\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?)", txt)
+        mt2 = _POST_TIME_RE.search(txt)
         if mt2:
-            fm.post_time = mt2.group(1)
+            y, mo, d, hh, mm = mt2.groups()
+            fm.post_time = "%04d-%02d-%02d %02d:%02d" % (
+                int(y), int(mo), int(d), int(hh), int(mm))
             fm.post_ts = to_ts(fm.post_time) or 0
 
     # 受理流程时间线（白送的数据：分类/受理/回复时长可直接算）

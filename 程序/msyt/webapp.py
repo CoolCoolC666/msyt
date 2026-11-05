@@ -63,6 +63,7 @@ from .hub import Hub
 from .http_client import Client
 from .listpage import ListCollector
 from .sources import Source, describe, expand_sources, make_source
+from .summarize import make_summary
 from .taxonomy import CATEGORIES, LIGHTS, MAILBOXES, STATES
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -1432,23 +1433,72 @@ def api_export(request: Request,
     if not safe.lower().endswith(".csv"):
         safe += ".csv"
     path = os.path.join(cfg.export_dir, safe)
-    rows = db.conn.execute(
-        "SELECT t.tid,t.title,t.url,t.pub_time,t.pub_day,t.dept_name,t.dept_group,"
-        "t.dept_district,t.category,t.state,t.mailbox_id,t.light_code,t.light_name,"
-        "t.author,t.replies,t.views,t.detail_state,t.posts_n,t.chars,"
-        "t.first_post_id,t.last_post_id,t.pages_total,"
-        "(SELECT group_concat(content,'\\n') FROM posts p WHERE p.tid=t.tid) AS full_text "
-        "FROM threads t ORDER BY t.pub_ts ASC").fetchall()
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f)
-        if rows:
-            w.writerow(rows[0].keys())
-            for r in rows:
-                w.writerow(list(r))
+    rows = db.export_csv(path)
     HUB.info(m.get("node_id") or "admin",
              f"{m.get('email')} 导出 {len(rows)} 条 → {os.path.basename(path)}", task="")
     return {"ok": True, "path": path, "rows": len(rows),
             "by": m.get("email"), "node": m.get("node_id")}
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 导出 {len(rows)} 条 → {os.path.basename(path)}", task="")
+    return {"ok": True, "path": path, "rows": len(rows),
+            "by": m.get("email"), "node": m.get("node_id")}
+
+
+# ====================================================================== 核验台账
+#: ★ 2026-11-05 新增（优化报告 P0-4）：课件「每条正式样本应包含
+#:   ⑤ 纳入、排除或待核验的理由　⑥ AI 初筛结果与人工复核结果」的载体。
+#:
+#: 与 `threads.detail_warn` 的区别（**别混**）：
+#:   · detail_warn  = **系统诊断**（「楼层号缺口」「计数核对」…）
+#:   · sample_review = **对样本的人工判断**（这条纳入还是排除、凭什么）
+@app.post("/api/review")
+def api_review_save(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """写一条**样本级核验结论**。
+
+    ★ 两条纪律（沿用 2026-10-21 确立的「复核人留空、复核日期填核对日」）：
+      · `reviewed_by`（复核人）是**人工签署位** ——
+        调用方不传就保持**真空**，服务端**不代填人名、不填「待定」占位符**。
+      · `reviewed_at`（复核日期）默认填**操作当天的数据核对日期**，
+        与「人工已签署复核」是**两件事**，不能混。
+        客户端可以显式传别的日期（比如对齐某次快照的核对日）。
+    """
+    m = _require_member(request)
+    cfg = _cfg()
+    db = get_db(cfg)
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 必须是整数")
+    if not tid:
+        raise HTTPException(400, "缺少 tid")
+    reviewed_at = (req.get("reviewed_at") or "").strip() \
+        or time.strftime("%Y-%m-%d")
+    try:
+        row = db.save_review(
+            tid,
+            req.get("verdict") or "",
+            req.get("reason") or "",
+            reviewed_by=req.get("reviewed_by") or "",
+            reviewed_at=reviewed_at,
+            method=req.get("method") or "人工",
+            ai_label=req.get("ai_label") or "",
+            ai_model=req.get("ai_model") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(m.get("node_id") or m.get("email") or "",
+             f"核验 tid={tid} → {row.get('verdict') or '（清空）'}", task="")
+    return {"ok": True, "review": row}
+
+
+@app.get("/api/review")
+def api_review_get(request: Request, tid: int = 0) -> Dict[str, Any]:
+    """读核验结论：给了 `tid` 返回单条；不给返回分类统计。"""
+    _require_member(request)
+    cfg = _cfg()
+    db = get_db(cfg)
+    if tid:
+        return {"ok": True, "review": db.get_review(tid)}
+    return {"ok": True, "stats": db.review_stats()}
 
 
 # ====================================================================== 认证 / 协作

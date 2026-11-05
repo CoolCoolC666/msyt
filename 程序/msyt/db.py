@@ -368,6 +368,31 @@ CREATE TABLE IF NOT EXISTS integrity_items (
 );
 CREATE INDEX IF NOT EXISTS idx_int_items_tid ON integrity_items(run_id, kind, tid);
 
+-- ---------------------------------------------------------------- 核验台账
+--: ★ 2026-11-05 新增（优化报告 P0-4）：课件「每条正式样本应包含
+--:   ⑤ 纳入、排除或待核验的理由　⑥ AI 初筛结果与人工复核结果」的载体。
+--:
+--: 与 `threads.detail_warn` 的区别（**别混**）：
+--:   · detail_warn = **系统诊断**（「楼层号缺口」「计数核对」…）
+--:   · sample_review = **对样本的人工判断**（这条纳入还是排除、凭什么）
+--:
+--: ★ 纪律：`reviewed_by`（复核人）是**人工签署位** ——
+--:   AI 不代填、不填「待定」占位符，保持真空；
+--:   `reviewed_at`（复核日期）填**本轮数据核对日期**，
+--:   与「人工已签署复核」是**两件事**，不能混为一谈。
+CREATE TABLE IF NOT EXISTS sample_review (
+    tid         INTEGER PRIMARY KEY,
+    verdict     TEXT NOT NULL DEFAULT '',  -- 纳入 / 排除 / 待核验（空 = 未复核）
+    reason      TEXT NOT NULL DEFAULT '',  -- 理由（verdict 非空时必填）
+    reviewed_by TEXT NOT NULL DEFAULT '',  -- ★ 人工签署位：留空待人签
+    reviewed_at TEXT NOT NULL DEFAULT '',  -- 本轮数据核对日期
+    method      TEXT NOT NULL DEFAULT '',  -- 人工 / AI初筛 / 规则自动
+    ai_label    TEXT NOT NULL DEFAULT '',  -- AI 初筛结论
+    ai_model    TEXT NOT NULL DEFAULT '',  -- 用了哪个模型（可追溯）
+    updated_at  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_review_verdict ON sample_review(verdict);
+
 -- ---------------------------------------------------------------- FTS5
 CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
     title,
@@ -809,6 +834,151 @@ class DB:
             row = self.conn.execute(
                 "SELECT detail_warn FROM threads WHERE tid=?", (tid,)).fetchone()
         return (row["detail_warn"] or "") if row else ""
+
+    # ---------------------------------------------------------------- 导出
+    #: 导出新增的 5 列（2026-11-05 · 优化报告 P0-2）
+    EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断"]
+
+    def export_csv(self, path: str) -> int:
+        """导出正式样本 CSV（**交付物**），返回导出行数。
+
+        ★ 2026-11-05 补 5 列，让交付件**自证可追溯**（课件字段①④⑤）：
+          ① 发现时间   —— 该帖首次被我们发现的时间（楼层 fetched_at 取 min）
+          ② 原文摘要   —— 抽取式摘要（本地规则，同输入必同输出）
+          ③ 核验结论   —— 纳入 / 排除 / 待核验 + 理由
+          ④ 候选池路径 —— 从哪个通道、什么形态进的候选池
+          ⑤ 系统诊断   —— `detail_warn`（以前**根本没导出**）
+
+        ★ 这几项都是**聚合查询一次拿到**，不给每行加相关子查询 ——
+          那是 60 万行 × 5 个子查询，导出直接不可用。
+        """
+        import csv
+        from .summarize import make_summary
+
+        rows = self.conn.execute(
+            "SELECT t.tid,t.title,t.url,t.pub_time,t.pub_day,t.dept_name,t.dept_group,"
+            "t.dept_district,t.category,t.state,t.mailbox_id,t.light_code,t.light_name,"
+            "t.author,t.replies,t.views,t.detail_state,t.posts_n,t.chars,"
+            "t.first_post_id,t.last_post_id,t.pages_total,"
+            "(SELECT group_concat(content,'\\n') FROM posts p WHERE p.tid=t.tid) AS full_text,"
+            "t.detail_warn AS _warn "
+            "FROM threads t ORDER BY t.pub_ts ASC").fetchall()
+        if not rows:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                csv.writer(f).writerow([])
+            return 0
+
+        first_seen = dict(self.conn.execute(
+            "SELECT tid, MIN(fetched_at) FROM posts WHERE pid>0 GROUP BY tid"))
+        src_of = dict(self.conn.execute(
+            "SELECT tid, group_concat(DISTINCT source) FROM thread_sources GROUP BY tid"))
+        form_of = dict(self.conn.execute(
+            "SELECT tid, group_concat(DISTINCT kind) FROM thread_list_forms GROUP BY tid"))
+        reviews = {int(r["tid"]): r for r in self.conn.execute(
+            "SELECT tid,verdict,reason FROM sample_review")}
+        # 每帖的**楼主正文**（每帖第一篇）—— 窗口函数一次扫描取完
+        first_content = {}
+        for tid, content in self.conn.execute(
+                "SELECT tid, content FROM ("
+                "SELECT tid, content, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY pid) rn "
+                "FROM posts WHERE pid>0) WHERE rn=1"):
+            first_content[int(tid)] = content
+
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            # ★ `_warn` 只是为了把 detail_warn 搬进新列「系统诊断」，
+            #   **不进表头** → 旧的 23 列一个不少、顺序不变。
+            base = [c for c in rows[0].keys() if c != "_warn"]
+            w.writerow(base + self.EXPORT_EXTRA_COLS)
+            for r in rows:
+                d = dict(r)
+                tid = int(d["tid"])
+                rv = reviews.get(tid)
+                verdict = (rv["verdict"] or "") if rv else ""
+                reason = (rv["reason"] or "") if rv else ""
+                path_desc = " / ".join(x for x in (
+                    src_of.get(tid) or "", form_of.get(tid) or "") if x)
+                w.writerow([d[c] for c in base] + [
+                    first_seen.get(tid) or "",
+                    make_summary(d.get("title") or "", d.get("dept_name") or "",
+                                 d.get("category") or "", d.get("state") or "",
+                                 first_content.get(tid) or "",
+                                 d.get("posts_n") or 0, d.get("chars") or 0),
+                    (f"{verdict}｜{reason}" if verdict else ""),
+                    path_desc,
+                    d.get("_warn") or "",
+                ])
+        return len(rows)
+
+    # ---------------------------------------------------------------- 核验台账
+    #: 核验结论的三个取值（空 = 未复核）
+    VERDICTS = ("纳入", "排除", "待核验")    #: 核验方式
+    REVIEW_METHODS = ("人工", "AI初筛", "规则自动")
+
+    def save_review(self, tid: int, verdict: str, reason: str,
+                    reviewed_by: str = "", reviewed_at: str = "",
+                    method: str = "人工", ai_label: str = "",
+                    ai_model: str = "") -> Dict[str, Any]:
+        """写一条**样本级核验结论**（课件字段⑤⑥ 的载体）。
+
+        ★ 纪律（2026-10-21 确立，这里沿用）：
+          · `reviewed_by` 是**人工签署位** —— 调用方不填就保持**真空**，
+            服务端**不代填人名、不填「待定」占位符**。
+          · `reviewed_at` 填**本轮数据核对日期**，
+            与「人工已签署复核」是**两件事**，不能混。
+
+        校验（信任边界）：verdict 必须是三个取值之一；verdict 非空时 reason 必填。
+        """
+        verdict = (verdict or "").strip()
+        reason = (reason or "").strip()
+        if verdict and verdict not in self.VERDICTS:
+            raise ValueError("verdict 只能是 %s，收到 %r" % (self.VERDICTS, verdict))
+        if verdict and not reason:
+            raise ValueError("有核验结论就必须写理由")
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO sample_review(tid,verdict,reason,reviewed_by,"
+                "reviewed_at,method,ai_label,ai_model,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(tid) DO UPDATE SET verdict=excluded.verdict, "
+                "reason=excluded.reason, reviewed_by=excluded.reviewed_by, "
+                "reviewed_at=excluded.reviewed_at, method=excluded.method, "
+                "ai_label=excluded.ai_label, ai_model=excluded.ai_model, "
+                "updated_at=excluded.updated_at",
+                (int(tid), verdict, reason, (reviewed_by or "").strip(),
+                 (reviewed_at or "").strip(), method or "人工",
+                 ai_label or "", ai_model or "", now))
+            self.conn.commit()
+        return self.get_review(tid)
+
+    def get_review(self, tid: int) -> Dict[str, Any]:
+        """读一条核验结论（没有就返回空 dict）。"""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM sample_review WHERE tid=?", (int(tid),)).fetchone()
+        return dict(row) if row else {}
+
+    def review_map(self) -> Dict[int, Dict[str, Any]]:
+        """全部核验结论（导出用）：{tid: 行}。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM sample_review").fetchall()
+        return {int(r["tid"]): dict(r) for r in rows}
+
+    def review_stats(self) -> Dict[str, int]:
+        """按结论分类计数（含「未复核」）。"""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT verdict, COUNT(*) n FROM sample_review GROUP BY verdict"
+            ).fetchall()
+        out = {v: 0 for v in self.VERDICTS}
+        for r in rows:
+            out[r["verdict"] or ""] = int(r["n"])
+        out["未复核"] = int(self.conn.execute(
+            "SELECT COUNT(*) FROM threads WHERE detail_state='done' "
+            "AND tid NOT IN (SELECT tid FROM sample_review)").fetchone()[0])
+        return out
 
     # ---------------------------------------------------------------- 增量
     # ---------------------------------------------------------------- 列表变更留痕
