@@ -287,6 +287,75 @@ class AssistService:
                 (limit, offset)).fetchall()
         return [dict(r) for r in rows], total
 
+    # ---------------------------------------------------------------- 裁决
+    #: 冲突种类 → 中文名（界面与接口共用一份，别各写各的）
+    CONFLICT_KINDS_CN = {
+        "merged_new": "新增（增量：站方追加的回复）",
+        "overwritten": "覆盖（成员版替换本地版）",
+        "empty": "空回传",
+        "local_done": "本地已完整（旧规则遗留）",
+        "dup_pid": "楼层重复（旧规则遗留）",
+        "content_diff": "内容不一致（旧规则遗留）",
+        "restricted": "站方限制（正文不公开）",
+    }
+
+    def conflict_counts(self) -> Dict[str, Dict[str, int]]:
+        """按种类统计：总数 / 已裁决 / 待裁决（界面做批量裁决按钮用）。"""
+        with self.db.lock:
+            rows = self.db.conn.execute(
+                "SELECT kind, resolved, COUNT(*) n FROM assist_conflicts "
+                "GROUP BY kind, resolved").fetchall()
+        out: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            d = out.setdefault(str(r["kind"]), {"total": 0, "resolved": 0, "pending": 0})
+            d["total"] += int(r["n"])
+            if int(r["resolved"] or 0):
+                d["resolved"] += int(r["n"])
+            else:
+                d["pending"] += int(r["n"])
+        return out
+
+    def resolve_conflicts(self, kind: str, note: str,
+                          resolved_by: str = "", resolved_at: str = "") -> int:
+        """按种类**批量裁决**：把这一类里还没裁决的都标成已裁决。
+
+        ★ 两条纪律（2026-11-05 用户拍板）：
+          · resolved_by（裁决人）是**人工签署位** —— 调用方不传就**留空**，
+            服务端**不代填人名、不填「待定」占位符**（沿用「复核人留空」）。
+          · **只写 assist_conflicts，不碰 sample_review** ——
+            这批记录是「合并痕迹」，不是「对样本的人工核验结论」；
+            把 8 万条机器裁决写进人工台账，会把真正的核验记录淹掉。
+        ★ 裁决不删数据：只是把 resolved 从 0 标成 1，并写清依据。
+        """
+        note = (note or "").strip()
+        if not note:
+            raise ValueError("裁决必须写说明（按哪条规则、为什么这样处理）")
+        at = (resolved_at or "").strip() or _now()[:10]
+        with self.db.lock:
+            n = self.db.conn.execute(
+                "UPDATE assist_conflicts SET resolved=1, resolved_at=?, "
+                "resolved_note=?, resolved_by=? WHERE kind=? AND resolved=0",
+                (at, note[:500], (resolved_by or "").strip(), kind)).rowcount
+            self.db.conn.commit()
+        return int(n)
+
+    def reopen_conflicts(self, kind: str) -> int:
+        """撤销某一类的裁决（**留痕不删**：旧说明保留，前面加「（已撤销）」）。"""
+        with self.db.lock:
+            rows = self.db.conn.execute(
+                "SELECT id, resolved_note FROM assist_conflicts "
+                "WHERE kind=? AND resolved=1", (kind,)).fetchall()
+            if not rows:
+                return 0
+            at = _now()[:10]
+            self.db.conn.executemany(
+                "UPDATE assist_conflicts SET resolved=0, resolved_at=?, "
+                "resolved_note=?, resolved_by='' WHERE id=?",
+                [(at, "（已撤销）" + (r["resolved_note"] or ""), int(r["id"]))
+                 for r in rows])
+            self.db.conn.commit()
+        return len(rows)
+
     # ---------------------------------------------------------------- 回传
     def submit(self, node: str, code: str, tid: int,
                posts: List[Dict], pages: List[Dict],

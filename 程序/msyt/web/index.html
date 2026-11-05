@@ -507,6 +507,14 @@
         <button class="ghost" id="btn-conflicts-refresh">刷新</button>
         <span class="dim" id="cf-count"></span>
       </div>
+      <!-- ★ 裁决区（优化报告 P1-3）：按类型批量裁决 + 可撤销 -->
+      <div class="row" id="cf-adjudicate">
+        <input id="cf-note" autocomplete="off" style="flex:1 1 420px"
+          placeholder="裁决说明（必填）：按哪条规则、为什么这样处理">
+        <span id="cf-kinds" class="dim"></span>
+      </div>
+      <p class="hint">裁决只是给这批合并痕迹<b>补一个结论</b>（已按规则处理 / 为什么），
+        <b>不删任何数据</b>，也<b>不改</b>「核验台账」里的人工结论 —— 那是另一回事。</p>
       <div class="tablewrap"><table id="t-conflicts"></table></div>
       <!-- ★ 翻页 + 折叠条（2026-10-23 加）
            合并记录会越积越多，一次铺开能顶掉好几屏；

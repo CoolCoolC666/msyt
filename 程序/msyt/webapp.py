@@ -2211,7 +2211,54 @@ def api_assist_conflicts(request: Request, code: str = "",
     cfg = _cfg()
     svc = AssistService(get_db(cfg), HUB)
     items, total = svc.conflicts(code=code, limit=limit, offset=offset)
-    return {"items": items, "total": total, "limit": limit, "offset": offset}
+    return {"items": items, "total": total, "limit": limit, "offset": offset,
+            "counts": svc.conflict_counts(),
+            "kind_cn": AssistService.CONFLICT_KINDS_CN}
+
+
+@app.post("/api/assist/conflicts/resolve")
+def api_assist_conflicts_resolve(request: Request,
+                                 req: dict = Body(...)) -> Dict[str, Any]:
+    """**批量裁决**某一类冲突（优化报告 P1-3）—— 管理员专属。
+
+    ★ 两条纪律（2026-11-05 用户拍板）：
+      · 只写 assist_conflicts 的裁决留痕，**不碰 sample_review**
+        （这批是「合并痕迹」，不是「对样本的人工核验结论」）；
+      · 裁决人**留空** —— 人工签署位，服务端不代填人名。
+    ★ 必须写说明：裁决要能回答「按哪条规则、为什么这样处理」。
+    """
+    m = require_admin(request)
+    kind = str(req.get("kind") or "").strip()
+    if kind not in AssistService.CONFLICT_KINDS_CN:
+        raise HTTPException(400, "不认识的冲突类型：%s" % kind)
+    cfg = _cfg()
+    svc = AssistService(get_db(cfg), HUB)
+    try:
+        n = svc.resolve_conflicts(kind, req.get("note") or "",
+                                  resolved_by=req.get("resolved_by") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 裁决冲突类型 {kind}：{n} 条", task="")
+    return {"ok": True, "kind": kind, "resolved": n,
+            "counts": svc.conflict_counts()}
+
+
+@app.post("/api/assist/conflicts/reopen")
+def api_assist_conflicts_reopen(request: Request,
+                                 req: dict = Body(...)) -> Dict[str, Any]:
+    """**撤销**某一类冲突的裁决（留痕不删：旧说明保留，前面加「（已撤销）」）。"""
+    m = require_admin(request)
+    kind = str(req.get("kind") or "").strip()
+    if kind not in AssistService.CONFLICT_KINDS_CN:
+        raise HTTPException(400, "不认识的冲突类型：%s" % kind)
+    cfg = _cfg()
+    svc = AssistService(get_db(cfg), HUB)
+    n = svc.reopen_conflicts(kind)
+    HUB.info(m.get("node_id") or "admin",
+             f"{m.get('email')} 撤销冲突类型 {kind} 的裁决：{n} 条", task="")
+    return {"ok": True, "kind": kind, "reopened": n,
+            "counts": svc.conflict_counts()}
 
 
 @app.post("/api/agent/heartbeat")

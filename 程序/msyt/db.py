@@ -316,7 +316,10 @@ CREATE TABLE IF NOT EXISTS assist_conflicts (
     reason     TEXT,
     local_val  TEXT,                             -- 本地已有的值（摘要）
     remote_val TEXT,                             -- 成员回传的值（摘要）
-    resolved   INTEGER DEFAULT 0,                -- 0=已按本地为准处理 1=人工处理过
+    resolved   INTEGER DEFAULT 0,                -- 0=待裁决 1=已裁决
+    resolved_at   TEXT,                          -- 裁决日期（人工签署位）
+    resolved_note TEXT,                          -- 裁决说明（按哪条规则、为什么）
+    resolved_by   TEXT,                          -- 裁决人（人工签署位，程序不代填）
     created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ac_tid ON assist_conflicts(tid);
@@ -630,6 +633,14 @@ class DB:
             },
             "districts": {
                 "py_initials": "TEXT",
+            },
+            "assist_conflicts": {
+                # ★ 裁决留痕（2026-11-05 · 优化报告 P1-3）
+                #   resolved_by 是**人工签署位** —— 服务端不代填人名，
+                #   也不填「待定」占位符（沿用「复核人留空」的老规矩）。
+                "resolved_at": "TEXT",
+                "resolved_note": "TEXT",
+                "resolved_by": "TEXT",
             },
         }
         for table, cols in wanted.items():

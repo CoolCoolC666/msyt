@@ -1226,7 +1226,7 @@ $('#btn-list').onclick = () => {
     if (!confirm(`即将启动 ${srcs} 条采集源，最坏 ${maxReq.toLocaleString()} 次请求`
       + `（按 1.0 秒/次约 ${h} 小时）。\n中途可随时点「停止」，进度会落库、可续采。\n\n继续？`)) return;
   }
-  // ★ 成员：转交本机 agent（不能��管理员的机器去刷站方）
+  // ★ 成员：转交本机 agent（不能在管理员的机器上刷站方）
   if (isMemberView()) {
     const spec = localSourcesFromPicker();
     if (!spec) { toast('先选采集源（点「全选」或勾选部门）', true); return; }
@@ -2904,14 +2904,10 @@ async function loadConflicts(page) {
       + '&offset=' + offset);
     const items = d.items || [];
     cfState.total = Number(d.total || 0);
-    const kindCn = {
-      overwritten: '覆盖（成员版替换本地版）',
-      merged_new: '新增（增量：站方追加的回复）',
-      empty: '空回传',
-      local_done: '本地已完整（旧规则遗留）',
-      dup_pid: '楼层重复（旧规则遗留）',
-      content_diff: '内容不一致（旧规则遗留）',
-    };
+    const kindCn = d.kind_cn || {};   // 中文名由后端给（别在前端再抄一份）
+    cfState.kindCn = kindCn;
+    cfState.counts = d.counts || {};
+    renderConflictKinds();
     box.innerHTML = `
       <thead><tr><th>时间</th><th>任务</th><th>TID</th><th>来源节点</th><th>类型</th>
       <th>说明</th><th>合并前</th><th>成员回传</th></tr></thead>
@@ -2924,8 +2920,13 @@ async function loadConflicts(page) {
         <td class="txt" title="${esc(c.reason || '')}">${esc(c.reason || '')}</td>
         <td class="txt txt2" title="${esc(c.local_val || '')}">${esc(c.local_val || '')}</td>
         <td class="txt txt2" title="${esc(c.remote_val || '')}">${esc(c.remote_val || '')}</td>
+        <td class="nowrap">${c.resolved
+          ? `<span class="badge green">已裁决</span>`
+          : `<span class="badge none">待裁决</span>`}
+          <div class="sub2 dim" title="${esc(c.resolved_note || '')}">
+            ${esc(c.resolved_at || '')}</div></td>
       </tr>`).join('')
-        : '<tr><td colspan="8" class="hint">还没有冲突记录</td></tr>'}</tbody>`;
+        : '<tr><td colspan="9" class="hint">还没有冲突记录</td></tr>'}</tbody>`;
     updateConflictsBar();
   } catch (e) {
     box.innerHTML = `<tbody><tr><td colspan="8" class="hint">载入失败：${esc(e.message)}</td></tr></tbody>`;
@@ -2958,6 +2959,55 @@ $('#btn-conflicts-refresh').onclick = () => loadConflicts(0);
 $('#cf-prev').onclick = () => loadConflicts(cfState.page - 1);
 $('#cf-next').onclick = () => loadConflicts(cfState.page + 1);
 $('#cf-toggle').onclick = toggleConflicts;
+
+/* ---------------- 冲突裁决（优化报告 P1-3） ----------------
+   裁决 = 给这批「合并痕迹」补一个结论（已按规则处理 / 为什么）。
+   * 只写 assist_conflicts，**不改**核验台账 —— 那是人工结论，另一回事。
+   * 裁决人留空 —— 那是人工签署位，服务端不代填人名。 */
+function renderConflictKinds() {
+  const box = $('#cf-kinds');
+  if (!box) return;
+  const counts = cfState.counts || {};
+  const kinds = Object.keys(counts);
+  if (!kinds.length) { box.textContent = '（还没有冲突记录）'; return; }
+  box.innerHTML = kinds.map(k => {
+    const c = counts[k];
+    const cn = (cfState.kindCn || {})[k] || k;
+    return `<span class="cf-kind"><b>${esc(cn)}</b>（待裁决 ${num(c.pending)} / 共 ${num(c.total)}）`
+      + (c.pending ? ` <button class="ghost tiny" data-cf-resolve="${esc(k)}">裁决本类</button>` : '')
+      + (c.resolved ? ` <button class="ghost tiny" data-cf-reopen="${esc(k)}">撤销裁决</button>` : '')
+      + `</span>`;
+  }).join('');
+}
+
+$('#cf-kinds').addEventListener('click', async ev => {
+  const rs = ev.target.closest('[data-cf-resolve]');
+  const rp = ev.target.closest('[data-cf-reopen]');
+  const note = $('#cf-note');
+  try {
+    if (rs) {
+      const kind = rs.dataset.cfResolve;
+      const c = (cfState.counts || {})[kind] || {};
+      const why = (note.value || '').trim();
+      if (!why) { toast('先写裁决说明：按哪条规则、为什么这样处理', true); return; }
+      const cn = (cfState.kindCn || {})[kind] || kind;
+      if (!confirm(`确认裁决「${cn}」的待裁决记录（${num(c.pending)} 条）？\n说明：${why}`)) return;
+      const d = await api('/api/assist/conflicts/resolve', {
+        method: 'POST', body: JSON.stringify({ kind: kind, note: why }) });
+      toast(`已裁决 ${num(d.resolved)} 条`);
+      loadConflicts(0);
+      return;
+    }
+    if (rp) {
+      const kind = rp.dataset.cfReopen;
+      if (!confirm('撤销这一类的裁决？\n（留痕不删：旧说明保留，并标注「已撤销」）')) return;
+      const d = await api('/api/assist/conflicts/reopen', {
+        method: 'POST', body: JSON.stringify({ kind: kind }) });
+      toast(`已撤销 ${num(d.reopened)} 条`);
+      loadConflicts(0);
+    }
+  } catch (e) { toast(e.message, true); }
+});
 
 $('#btn-assist-pick').onclick = async () => {
   try {
