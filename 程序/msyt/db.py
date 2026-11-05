@@ -870,10 +870,15 @@ class DB:
 
         first_seen = dict(self.conn.execute(
             "SELECT tid, MIN(fetched_at) FROM posts WHERE pid>0 GROUP BY tid"))
+        # ⚠ `group_concat(DISTINCT x, sep)` 在 SQLite 里**不合法**
+        #   （DISTINCT 聚合只能有一个参数）→ 先在子查询里去重，再拼。
+        #   分隔符用 " / "：这个栏是给人看的，逗号连成一坨读不了。
         src_of = dict(self.conn.execute(
-            "SELECT tid, group_concat(DISTINCT source) FROM thread_sources GROUP BY tid"))
+            "SELECT tid, group_concat(source,' / ') FROM "
+            "(SELECT DISTINCT tid, source FROM thread_sources) GROUP BY tid"))
         form_of = dict(self.conn.execute(
-            "SELECT tid, group_concat(DISTINCT kind) FROM thread_list_forms GROUP BY tid"))
+            "SELECT tid, group_concat(kind,' / ') FROM "
+            "(SELECT DISTINCT tid, kind FROM thread_list_forms) GROUP BY tid"))
         reviews = {int(r["tid"]): r for r in self.conn.execute(
             "SELECT tid,verdict,reason FROM sample_review")}
         # 每帖的**楼主正文**（每帖第一篇）—— 窗口函数一次扫描取完
