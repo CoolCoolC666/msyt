@@ -56,6 +56,7 @@ from .assist import AssistService
 from .auth import (email_allowed, hash_pw, make_token, new_secret, read_token,
                    verify_pw)
 from . import bundle
+from . import topic
 from .config import Config
 from .db import DB
 from .detail import DetailCollector
@@ -2125,14 +2126,33 @@ def api_assist_task(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     svc = AssistService(get_db(cfg), HUB)
     try:
         t = svc.create(req.get("title") or "", [int(x) for x in (req.get("dept_ids") or [])],
-                       int(req.get("total") or 50), "admin")
+                       int(req.get("total") or 50), "admin",
+                       scope=str(req.get("scope") or ""),
+                       keywords=str(req.get("keywords") or ""),
+                       audience=str(req.get("audience") or ""),
+                       spec=str(req.get("spec") or ""))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"task": t}
 
 
+@app.get("/api/assist/topic/preview")
+def api_assist_topic_preview(request: Request,
+                             scope: str = Query("", max_length=100),
+                             keywords: str = Query("", max_length=300),
+                             audience: str = Query("", max_length=100),
+                             spec: str = Query("", max_length=100)) -> Dict[str, Any]:
+    """**规范选题名预览**（P2-3）。
+
+    ★ 预览走**后端**，前端不再抄一份命名规则 —— 两份规则迟早会走样，
+      界面上看到的名字和库里存的就不一样了。
+    """
+    require_auth(request)
+    return {"title": topic.display_title("", scope, keywords, audience, spec)}
+
+
 @app.get("/api/assist/tasks")
-def api_assist_tasks(request: Request) -> Dict[str, Any]:
+def api_assist_tasks(request: Request, q: str = Query("", max_length=100)) -> Dict[str, Any]:
     """任务列表：管理员与成员都能看（成员要知道大家在干什么）。
 
     ★ 每条任务都带 **拆开的进度**：
@@ -2144,7 +2164,7 @@ def api_assist_tasks(request: Request) -> Dict[str, Any]:
     require_auth(request)
     cfg = _cfg()
     svc = AssistService(get_db(cfg), HUB)
-    return {"items": svc.tasks()}
+    return {"items": svc.tasks(q)}
 
 
 @app.get("/api/assist/online")

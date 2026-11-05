@@ -28,6 +28,7 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import topic
 from .db import DB
 from .hub import Hub
 
@@ -47,7 +48,8 @@ class AssistService:
 
     # ---------------------------------------------------------------- 建任务
     def create(self, title: str, dept_ids: List[int], total: int = 50,
-               created_by: str = "admin") -> Dict[str, Any]:
+               created_by: str = "admin", scope: str = "", keywords: str = "",
+               audience: str = "", spec: str = "") -> Dict[str, Any]:
         """管理员发布一个协助请求：按部门挑出**还没采详情**的帖，拆成单帖的活。
 
         ★ 选帖顺序：**先新后旧**（2026-10-23 改）
@@ -59,6 +61,12 @@ class AssistService:
 
         ★ 排除 `detail_state='restricted'` 的帖：
           已经被站方判定为「正文不公开」的，再派一次只是让成员白跑一趟。
+
+        ★ 选题四要素（2026-11-06 · 优化报告 P2-3）：
+          监测范围 / 关键词 / 服务对象 / 报告规格 —— 课件口径：
+          「选题名称可由监测范围、关键词、服务对象和报告规格等构成」。
+          四要素**入库**，规范名（给人看的那个）由 topic.build_title **现算**。
+          `title` 保留为管理员自己写的一句话（可空），显示时拼在规范名前面。
         """
         ids = [str(x) for x in (dept_ids or []) if str(x).strip()]
         if not ids:
@@ -85,14 +93,22 @@ class AssistService:
         with self.db.lock:
             self.db.conn.execute(
                 "INSERT INTO assist_tasks(code,title,dept_ids,total,done,state,"
-                "created_by,created_at,updated_at) VALUES(?,?,?,?,0,'open',?,?,?)",
-                (code, title or "", ",".join(ids), len(tids), created_by, now, now))
+                "scope,keywords,audience,spec,created_by,created_at,updated_at) "
+                "VALUES(?,?,?,?,0,'open',?,?,?,?,?,?,?)",
+                (code, title or "", ",".join(ids), len(tids),
+                 (scope or "").strip(), topic.norm_keywords(keywords),
+                 (audience or "").strip(), (spec or "").strip(),
+                 created_by, now, now))
             self.db.conn.executemany(
                 "INSERT OR IGNORE INTO assist_picks(task_code,tid,state) "
                 "VALUES(?,?,'pending')", [(code, t) for t in tids])
             self.db.conn.commit()
         self.hub.info("admin", f"发布协助请求 {code}：{len(tids)} 帖（{title or '未命名'}）",
                       task=code)
+        # ★ 日志里也带规范名 —— 只写编号的话，事后翻日志看不出这任务是查什么的
+        t_name = topic.build_title(scope, keywords, audience, spec)
+        if t_name:
+            self.hub.info("admin", f"选题：{t_name}", task=code)
         return self.get(code)
 
     def _next_code(self) -> str:
@@ -706,6 +722,10 @@ class AssistService:
         if not r:
             return {}
         d = dict(r)
+        # ★ 规范选题名：四要素现算（不另存一列，避免名与实不符）
+        d["topic_title"] = topic.display_title(
+            d.get("title"), d.get("scope"), d.get("keywords"),
+            d.get("audience"), d.get("spec"))
         d["picked"] = self.db.conn.execute(
             "SELECT COUNT(*) FROM assist_picks WHERE task_code=?", (code,)).fetchone()[0]
         d["by_node"] = {x["node"]: x["n"] for x in self.db.conn.execute(
@@ -754,7 +774,7 @@ class AssistService:
             slot["total"] += x["n"]
         return out
 
-    def tasks(self) -> List[Dict[str, Any]]:
+    def tasks(self, q: str = "") -> List[Dict[str, Any]]:
         # 列表也顺手回收一下超时未回传的活（好让界面及时显示真实池子）
         # ★ 但**回收失败绝不能让这个读接口 500**：回收是「顺手做的 housekeeping」，
         #   失败了就晚点再回收，不该把整个界面打挂
@@ -766,7 +786,13 @@ class AssistService:
             pass
         codes = [r["code"] for r in self.db.conn.execute(
             "SELECT code FROM assist_tasks ORDER BY id DESC").fetchall()]
-        return [self.get(c) for c in codes]
+        items = [self.get(c) for c in codes]
+        # ★ 检索（2026-11-06 · P2-3）：按编号 / 自定义标题 / 四要素 / 规范名 包含匹配。
+        #   历史任务要能被翻出来，靠的就是这个（规范名是派生物，SQL 里算不出来）。
+        key = (q or "").strip().lower()
+        if not key:
+            return items
+        return [t for t in items if key in topic.search_haystack(t).lower()]
 
     def online(self, stale_sec: int = 300) -> List[Dict[str, Any]]:
         """**谁还在线** —— 界面上要能一眼看出「谁在采、有没有卡住」。

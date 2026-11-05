@@ -278,7 +278,11 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS assist_tasks (
     id         INTEGER PRIMARY KEY,
     code       TEXT UNIQUE NOT NULL,             -- 编号：A1 / A2 / A3…
-    title      TEXT,
+    title      TEXT,                            -- 自定义标题（可空）
+    scope      TEXT,                            -- 选题要素①监测范围
+    keywords   TEXT,                            -- 选题要素②关键词（规范串）
+    audience   TEXT,                            -- 选题要素③服务对象
+    spec       TEXT,                            -- 选题要素④报告规格
     dept_ids   TEXT,                            -- 逗号分隔的部门 typeid
     total      INTEGER DEFAULT 0,               -- 目标帖数
     done       INTEGER DEFAULT 0,
@@ -649,6 +653,15 @@ class DB:
             },
             "districts": {
                 "py_initials": "TEXT",
+            },
+            "assist_tasks": {
+                # ★ 选题四要素（2026-11-06 · 优化报告 P2-3）
+                #   规范名由这四要素**现算**（msyt/topic.py），不另存一列，
+                #   免得「标题写着周报、实际是专题」这种自相矛盾。
+                "scope": "TEXT",
+                "keywords": "TEXT",
+                "audience": "TEXT",
+                "spec": "TEXT",
             },
             "assist_conflicts": {
                 # ★ 裁决留痕（2026-11-05 · 优化报告 P1-3）

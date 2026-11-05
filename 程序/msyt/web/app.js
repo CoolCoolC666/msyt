@@ -2762,9 +2762,14 @@ function ago(sec) {
   return `${Math.floor(sec / 86400)} 天前`;
 }
 
-async function loadAssistTasks() {
-  const d = await api('/api/assist/tasks');
+async function loadAssistTasks(q) {
+  // ★ 检索（P2-3）：按编号 / 选题名 / 关键词 / 服务对象 搜历史任务
+  const box = document.getElementById('as-q');
+  const kw = ((q === undefined ? (box ? box.value : '') : q) || '').trim();
+  const d = await api('/api/assist/tasks' + (kw ? '?q=' + encodeURIComponent(kw) : ''));
   const items = d.items || [];
+  const hint = document.getElementById('as-q-hint');
+  if (hint) hint.textContent = kw ? `命中 ${items.length} 条` : `共 ${items.length} 条`;
   const isAdmin = !!(state.me && state.me.role === 'admin');
   $('#t-assist').innerHTML = `
     <thead><tr><th>编号</th><th>标题</th><th>状态</th><th>进度</th>
@@ -2794,7 +2799,7 @@ async function loadAssistTasks() {
       }
       return `<tr class="clickable" data-open="${esc(t.code)}" title="点开看这个任务的详情">
         <td><b>${esc(t.code)}</b></td>
-        <td>${esc(t.title || '')}</td>
+        <td title="${esc(t.topic_title || t.title || '')}">${esc(t.topic_title || t.title || '')}</td>
         <td><span class="badge ${t.state === 'done' ? 'done'
           : (t.state === 'active' ? 'teal'
             : (t.state === 'cancelled' ? 'warn' : 'pending'))}"
@@ -2885,7 +2890,7 @@ async function openTask(code) {
   try {
     const d = await api('/api/assist/task/' + encodeURIComponent(code) + '?limit=300');
     const t = d.task || {};
-    $('#dw-title').textContent = `协作任务 ${t.code}` + (t.title ? ` · ${t.title}` : '');
+    $('#dw-title').textContent = `协作任务 ${t.code}` + (t.topic_title ? ` · ${t.topic_title}` : '');
     $('#dw-meta').innerHTML = [
       `状态 ${t.state === 'cancelled' ? '已撤销' : t.state}`,
       `进度 ${num(t.done)}/${num(t.total)}`,
@@ -2919,7 +2924,12 @@ async function openTask(code) {
       </tr>`;
     }).join('');
 
+    const topicRows = [
+      ['监测范围', t.scope], ['关键词', t.keywords],
+      ['服务对象', t.audience], ['报告规格', t.spec],
+    ].filter(x => x[1]).map(x => `${x[0]}：${esc(x[1])}`).join(' · ');
     let html = `<div class="secttl">概要</div>
+      <div style="margin-bottom:12px">${topicRows ? '选题：' + topicRows : '（这个任务没填选题要素）'}</div>
       <div style="margin-bottom:12px">各节点贡献：${nodes}</div>`;
     html += `<div class="secttl">这个任务里的帖子（共 ${num(d.total)} 条，`
       + `显示 ${num((d.items || []).length)} 条）</div>
@@ -2972,12 +2982,53 @@ $('#btn-assist-create').onclick = async () => {
   try {
     const d = await api('/api/assist/task', {
       method: 'POST',
-      body: JSON.stringify({ title: $('#as-title').value, dept_ids: ids, total: +$('#as-total').value || 50 }),
+      body: JSON.stringify({
+        title: $('#as-title').value,
+        dept_ids: ids,
+        total: +$('#as-total').value || 50,
+        scope: $('#as-scope').value,
+        keywords: $('#as-keywords').value,
+        audience: $('#as-audience').value,
+        spec: $('#as-spec').value,
+      }),
     });
-    toast(`已发布协作任务 ${d.task.code}（${d.task.total} 帖）`);
+    toast(`已发布协作任务 ${d.task.code}（${d.task.total} 帖）`
+      + (d.task.topic_title ? '：' + d.task.topic_title : ''));
     loadAssistTasks();
   } catch (e) { toast(e.message, true); }
 };
+
+/* 规范选题名预览：走**后端**算 —— 前端不抄一份命名规则，
+   两份规则迟早走样，界面上看到的名字就和库里存的不是一个东西了。 */
+let topicPrevTimer = null;
+async function refreshTopicPreview() {
+  const box = document.getElementById('as-topic-preview');
+  if (!box) return;
+  const p = new URLSearchParams({
+    scope: $('#as-scope').value, keywords: $('#as-keywords').value,
+    audience: $('#as-audience').value, spec: $('#as-spec').value,
+  });
+  try {
+    const d = await api('/api/assist/topic/preview?' + p.toString());
+    box.textContent = d.title || '（四要素都还空着）';
+  } catch (e) { box.textContent = '（预览失败）'; }
+}
+['as-scope', 'as-keywords', 'as-audience', 'as-spec'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', () => {
+    clearTimeout(topicPrevTimer);
+    topicPrevTimer = setTimeout(refreshTopicPreview, 250);
+  });
+});
+
+/* 任务检索：输入即筛（250ms 防抖，别每个字都打一次库） */
+let assistSearchTimer = null;
+const asQ = document.getElementById('as-q');
+if (asQ) asQ.addEventListener('input', () => {
+  clearTimeout(assistSearchTimer);
+  assistSearchTimer = setTimeout(() => loadAssistTasks(), 250);
+});
 
 /* ---------------- 合并冲突记录 ----------------
    「不跳过、采取并覆盖」这条规则，必须**看得见**：

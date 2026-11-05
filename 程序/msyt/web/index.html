@@ -437,9 +437,18 @@
         <h3>发布协助请求</h3>
         <p class="hint">选部门 → 自动挑出该部门下**还没采详情**的帖，拆成单帖的活派给成员。</p>
         <div class="row">
-          <input id="as-title" placeholder="标题（会出现在任务编号旁）">
+          <input id="as-title" placeholder="自定义标题（可选，如「本周加急」）">
           <input id="as-total" type="number" value="50" min="1" title="最多拆多少帖">
         </div>
+        <div class="row">
+          <input id="as-scope" placeholder="监测范围（查哪儿，如：宁波公交·换乘）">
+          <input id="as-keywords" placeholder="关键词（查什么，如：晚点,拥挤,换乘）">
+        </div>
+        <div class="row">
+          <input id="as-audience" placeholder="服务对象（给谁看，如：市交通运输局）">
+          <input id="as-spec" placeholder="报告规格（怎么交，如：周报·3000字）">
+        </div>
+        <div class="hint">规范选题名：<b id="as-topic-preview">（填上面四要素，自动生成）</b></div>
         <div class="picker" id="picker-assist">
           <div class="picker-bar">
             <input class="dp-search" type="search" placeholder="筛选部门" autocomplete="off">
@@ -473,6 +482,10 @@
       <p class="hint">「进行中」= 已领走还没回传的活；「还剩」= 池子里还没人领的活。
         超过 30 分钟没回传的活会自动<b>退回池子</b>（防止有人领了不干把池子占死）。<br>
         <b>点任意一行可看这个任务的详情</b>（哪几帖采到了、哪几帖还欠着、谁采的）。</p>
+      <div class="row">
+        <input id="as-q" type="search" placeholder="搜任务：编号 / 选题名 / 关键词 / 服务对象" style="max-width:420px">
+        <span class="hint" id="as-q-hint"></span>
+      </div>
       <div class="tablewrap"><table id="t-assist"></table></div>
     </div>
 
