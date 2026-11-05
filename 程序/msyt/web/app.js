@@ -3028,21 +3028,34 @@ async function loadKeywords() {
     sel.innerHTML = Object.keys(cn).map(k =>
       `<option value="${esc(k)}">${esc(cn[k])}</option>`).join('');
   }
+  // ★ 颜色即角色（用户 2026-11-05 要求）：
+  //   绿 = 纳入类词（命中即「加」）｜ 黄 = 扩展词（别称/变体，也是「加」）
+  //   红 = 排除词（命中即从别的词命中里「扣掉」）
+  //   状态文案也跟着改：排除词不再写「启用」（反直觉）→ 写「排除中」。
+  const roleOf = k => (k.kind === 'exclude' ? 'ex' : (k.kind === 'variant' ? 'var' : 'add'));
+  const kindCls = k => (k.kind === 'exclude' ? 'warn'
+    : (k.kind === 'variant' ? 'yellow' : 'green'));
   box.innerHTML = `
-    <thead><tr><th>词</th><th>词类</th><th>父词</th><th>命中帖</th><th>命中楼层</th>
-      <th>状态</th><th>备注</th><th>操作</th></tr></thead>
-    <tbody>${items.length ? items.map(k => `<tr>
+    <thead><tr><th>词</th><th>词类</th><th>父词</th>
+      <th title="排除词这一列是「它扣掉了多少帖」；其它词是「命中了多少帖」">命中帖</th>
+      <th>命中楼层</th><th>状态</th><th>备注</th><th>操作</th></tr></thead>
+    <tbody>${items.length ? items.map(k => `<tr class="kw-row-${roleOf(k)}">
       <td><b>${esc(k.word)}</b></td>
-      <td class="nowrap">${esc(k.kind_cn || k.kind)}</td>
+      <td class="nowrap"><span class="badge ${kindCls(k)}">${esc(k.kind_cn || k.kind)}</span></td>
       <td class="dim">${esc(k.parent || '—')}</td>
-      <td class="num">${num(k.hit_tids)}</td>
+      <td class="num" title="${k.kind === 'exclude'
+        ? '命中这个排除词的帖，会从其它词的命中里扣掉'
+        : '命中这个词的帖数'}">${num(k.hit_tids)}${k.kind === 'exclude'
+        ? '<span class="dim">（扣）</span>' : ''}</td>
       <td class="num">${num(k.hit_posts)}</td>
       <td class="nowrap">${k.enabled
-        ? '<span class="badge done">启用</span>'
-        : '<span class="badge none">停用</span>'}</td>
+        ? (k.kind === 'exclude'
+          ? '<span class="badge warn">排除中</span>'
+          : '<span class="badge green">生效中</span>')
+        : '<span class="badge none">已停用</span>'}</td>
       <td class="txt" title="${esc(k.note || '')}">${esc(k.note || '')}</td>
       <td class="nowrap">
-        <button class="ghost tiny" data-kw-hits="${k.id}">命中</button>
+        <button class="ghost tiny" data-kw-hits="${k.id}">${k.kind === 'exclude' ? '看被扣的帖' : '命中'}</button>
         <button class="ghost tiny" data-kw-toggle="${k.id}" data-on="${k.enabled ? 1 : 0}">
           ${k.enabled ? '停用' : '启用'}</button>
         <button class="ghost tiny" data-kw-del="${k.id}">删除</button>

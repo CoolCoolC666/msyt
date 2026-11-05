@@ -953,6 +953,10 @@ class DB:
         normal = [(i, w) for i, w, k in kws if k != "exclude"]
 
         hits: Dict[str, Dict[int, int]] = {w: {} for _, w in normal}
+        # ★ 排除词**自己也记命中**（它扣掉了多少帖）——
+        #   否则界面上排除词的「命中帖」恒显示 0，看着像没用，
+        #   其实是「它在减别人的命中」→ 数字必须让人看得懂。
+        excl_hits: Dict[str, Dict[int, int]] = {w: {} for w in exclude_words}
         exclude_tids: set = set()
         scanned = 0
         # ★ 全表扫描**不占写锁**（WAL 下读与写可以并发）——
@@ -966,13 +970,15 @@ class DB:
             for w in exclude_words:
                 if w in content:
                     exclude_tids.add(int(tid))
-                    break
+                    c = content.count(w)
+                    if c:
+                        excl_hits[w][int(tid)] = c
             for _, w in normal:
                 c = content.count(w)
                 if c:
                     hits[w][int(tid)] = c
 
-        # 扣掉被排除的帖子
+        # 扣掉被排除的帖子（只扣普通词；排除词自己是「减」的一方）
         for w in hits:
             if exclude_tids:
                 hits[w] = {t: c for t, c in hits[w].items()
@@ -981,8 +987,9 @@ class DB:
         # 落库：先清再写（扫描结果是这一次的快照）
         rows = []
         now = time.strftime("%Y-%m-%d %H:%M:%S")
-        for kid, word, _kind in kws:
-            for tid, c in hits.get(word, {}).items():
+        for kid, word, kind in kws:
+            src = excl_hits.get(word, {}) if kind == "exclude" else hits.get(word, {})
+            for tid, c in src.items():
                 rows.append((kid, tid, c, now))
         with self.lock:
             self.conn.execute("DELETE FROM keyword_hits")

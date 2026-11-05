@@ -230,6 +230,16 @@ td .sub2 { color: var(--dim); font-size: 11.5px; }
 .badge.skipped{ background: #f6f0fb;           color: #6b4fa0;      border-color: #e2d4f2; }
 .badge.teal   { background: var(--accent-soft);color: var(--accent); border-color: #bfe0dc; }
 
+/* ------------------------------------------------- 词表页（2026-11-05）
+   颜色 = 词的角色：绿=纳入（加） 黄=扩展（加·变体） 红=排除（减） */
+.kw-row-add td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+.kw-row-var td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.kw-row-ex  td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.kw-row-ex  td { background: var(--danger-soft); }
+.kwleg-add { color: var(--ok); }
+.kwleg-var { color: var(--warn); }
+.kwleg-ex  { color: var(--danger); }
+
 /* ------------------------------------------------- 可点筛选的标签（2026-10-24）
    表格里的 类别 / 状态 / 时效灯 / 部门 都做成「点一下就按它筛」。 */
 .tagfilter {
