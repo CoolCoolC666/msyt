@@ -52,6 +52,7 @@ from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .anno import AnnoService
 from .assist import AssistService
 from .auth import (email_allowed, hash_pw, make_token, new_secret, read_token,
                    verify_pw)
@@ -1569,6 +1570,122 @@ def api_review_get(request: Request, tid: int = 0) -> Dict[str, Any]:
     if tid:
         return {"ok": True, "review": db.get_review(tid)}
     return {"ok": True, "stats": db.review_stats()}
+
+
+# ====================================================================== 人工标注台
+#: ★ 2026-11-06 新增（人工标注功能）：组员在网页上标，管理员复核。
+#:
+#: 与「核验台账」(/api/review) 的关系：
+#:   /api/review  = 直接写一条核验结论（脚本/接口用）
+#:   /api/anno/*  = **带队列的标注台**（网页用）：领活 → 标 → 提交 → 复核
+#:   两者最后都落到同一张 sample_review + thread_anno_tags。
+@app.get("/api/anno/vocab")
+def api_anno_vocab(request: Request) -> Dict[str, Any]:
+    """候选标签清单（各维度已出现过的取值）。"""
+    _require_member(request)
+    return AnnoService(get_db(_cfg()), HUB).vocab()
+
+
+@app.get("/api/anno/queue")
+def api_anno_queue(request: Request, assignee: str = Query("", max_length=100),
+                   limit: int = Query(200, ge=1, le=1000)) -> Dict[str, Any]:
+    """标注队列：默认只看**自己**的（成员干自己的活）。"""
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    me = m.get("node_id") or m.get("email") or ""
+    who = (assignee or "").strip() or me
+    if who != me:
+        # 看别人的队列 = 管理员的事
+        require_admin(request)
+    return {"items": svc.queue(who, limit), "assignee": who, "me": me}
+
+
+@app.post("/api/anno/queue")
+def api_anno_enqueue(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """把帖子放进标注队列。
+
+    ★ **派给别人 = 管理员的活**；成员只能把活放进自己的队列。
+    """
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    me = m.get("node_id") or m.get("email") or ""
+    who = str(req.get("assignee") or "").strip() or me
+    if who != me:
+        require_admin(request)
+    tids = req.get("tids") or []
+    try:
+        r = svc.enqueue(tids, who, str(req.get("task_code") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(me, f"标注队列 +{r['queued']} 条（任务 {r['task_code']}）", task=r["task_code"])
+    return r
+
+
+@app.get("/api/anno/item/{tid}")
+def api_anno_item(request: Request, tid: int) -> Dict[str, Any]:
+    """一条待标注的内容：帖子 + 楼层 + 规则标签 + 已有标注 + 候选标签。"""
+    _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    d = svc.item(tid)
+    if not d:
+        raise HTTPException(404, "帖子不存在")
+    return {"item": d, "vocab": svc.vocab()}
+
+
+@app.post("/api/anno/submit")
+def api_anno_submit(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """提交一条人工标注（核验结论 + 三维标签一起提交）。"""
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    node = m.get("node_id") or m.get("email") or ""
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 必须是整数")
+    if not tid:
+        raise HTTPException(400, "缺少 tid")
+    try:
+        r = svc.submit(node, tid, req.get("verdict") or "", req.get("reason") or "",
+                       req.get("tags") or [])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(node, f"人工标注 tid={tid} → {r.get('verdict') or '（只改标签）'}", task="")
+    return r
+
+
+@app.post("/api/anno/review")
+def api_anno_review(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """管理员复核一条标注：通过 / 打回（打回必须写意见）。"""
+    m = require_admin(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 必须是整数")
+    if not tid:
+        raise HTTPException(400, "缺少 tid")
+    try:
+        r = svc.review(tid, bool(req.get("approved")), req.get("note") or "",
+                       m.get("email") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(m.get("email") or "", f"复核 tid={tid} → {r.get('status')}", task="")
+    return r
+
+
+@app.get("/api/anno/stats")
+def api_anno_stats(request: Request) -> Dict[str, Any]:
+    """标注进度：队列、标注状态、核验结论三块。"""
+    _require_member(request)
+    return AnnoService(get_db(_cfg()), HUB).stats()
+
+
+@app.get("/api/anno/pending")
+def api_anno_pending(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
+    """待复核的标注（管理员专属）。"""
+    require_admin(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    return {"items": svc.pending(limit), "stats": svc.stats()}
 
 
 # ====================================================================== 词表

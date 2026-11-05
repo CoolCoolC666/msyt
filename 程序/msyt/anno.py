@@ -1,0 +1,268 @@
+# -*- coding: utf-8 -*-
+"""
+anno.py —— 人工标注台（人工标注功能）
+
+★ 定位：**在现有系统里自建标注台**，不引入 Label Studio / doccano 那套独立系统
+  （要 Docker + 第二套账号 + 数据导出再导回，两处很容易不同步）。
+  交互照它们的成熟做法来：任务队列 → 逐条标注 → 提交 → 复核 → 进度统计。
+
+★ 核心口径（用户 2026-11-06 拍板）：**人工标签优先覆盖规则标签，规则值留痕可追溯**
+  → 导出写两列：「三维标签」= 人工优先后的最终值；「规则三维标签」= 规则算的原值。
+
+★ 人工标签三种状态：
+  submitted  已标注待复核 → **已生效**（覆盖规则值）
+  approved   已复核通过
+  rejected   已打回       → **失效**，导出回落到规则标签（记录仍留着，不删）
+
+★ 签署位纪律（沿用 2026-10-21「复核人留空」）：
+  组员标注时**不动** reviewed_by（复核人是人工签署位，不能代签）；
+  管理员**本人逐条**点「通过/打回」时才记他自己的 email —— 那是他刚做的动作。
+"""
+from __future__ import annotations
+
+import time
+from typing import Any, Dict, List, Tuple
+
+from .db import DB
+from .hub import Hub
+
+#: 三个维度的中文名（界面用；标签取值来自 tags.py，不另造一套）
+DIM_CN = {
+    "relation": "关系",
+    "process": "过程",
+    "impact": "影响",
+}
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def anno_tag_map_text(conn) -> Dict[int, str]:
+    """{tid: 人工标签1 / 人工标签2} —— **已生效**的人工标签（被打回的除外）。"""
+    out: Dict[int, str] = {}
+    for tid, tag in conn.execute(
+            "SELECT tid, tag FROM thread_anno_tags WHERE status<>'rejected' "
+            "ORDER BY tid, dim, tag"):
+        tid = int(tid)
+        out[tid] = (out[tid] + " / " + tag) if tid in out else tag
+    return out
+
+
+def merge_tags(rule: Dict[int, str], anno: Dict[int, str]) -> Dict[int, str]:
+    """**人工优先**：人工标签存在就用人工的，否则用规则的。"""
+    out = dict(rule)
+    for tid, text in (anno or {}).items():
+        if text:
+            out[tid] = text
+    return out
+
+
+class AnnoService:
+    def __init__(self, db: DB, hub: Hub):
+        self.db = db
+        self.hub = hub
+
+    # ---------------------------------------------------------------- 队列
+    def next_code(self) -> str:
+        """标注任务编号：L1 / L2…（与协作采集的 A1 / A2 区分开）。"""
+        n = self.db.conn.execute("SELECT COUNT(*) FROM anno_queue").fetchone()[0]
+        i = n + 1
+        while self.db.conn.execute("SELECT 1 FROM anno_queue WHERE task_code=?",
+                                   (f"L{i}",)).fetchone():
+            i += 1
+        return f"L{i}"
+
+    def enqueue(self, tids: List[Any], assignee: str = "",
+                task_code: str = "") -> Dict[str, Any]:
+        """把帖子放进标注队列。
+
+        ★ **只收已采到正文的帖** —— 没正文根本标不了，
+          标一条空帖只会得到一个空结论，浪费标注员的时间。
+        """
+        want = []
+        for t in (tids or []):
+            try:
+                want.append(int(t))
+            except (TypeError, ValueError):
+                continue
+        if not want:
+            raise ValueError("没挑到帖子")
+        ok = []
+        for t in want:
+            r = self.db.conn.execute(
+                "SELECT detail_state FROM threads WHERE tid=?", (t,)).fetchone()
+            if r and (r["detail_state"] or "") == "done":
+                ok.append(t)
+        if not ok:
+            raise ValueError("挑的帖都还没采到正文，标不了")
+        code = (task_code or "").strip() or self.next_code()
+        now = _now()
+        with self.db.lock:
+            self.db.conn.executemany(
+                "INSERT INTO anno_queue(tid,assignee,state,task_code,added_at) "
+                "VALUES(?,?,'queued',?,?) "
+                "ON CONFLICT(tid) DO UPDATE SET assignee=excluded.assignee, "
+                "state='queued', task_code=excluded.task_code, done_at=''",
+                [(t, assignee or "", code, now) for t in ok])
+            self.db.conn.commit()
+        return {"task_code": code, "queued": len(ok),
+                "skipped": len(want) - len(ok)}
+
+    def queue(self, assignee: str = "", limit: int = 200) -> List[Dict[str, Any]]:
+        """标注队列：待标的排前面，已标的排后面。"""
+        sql = ("SELECT q.tid, q.assignee, q.state, q.task_code, q.added_at, q.done_at, "
+               "t.title, t.dept_name, t.detail_state "
+               "FROM anno_queue q LEFT JOIN threads t ON t.tid=q.tid")
+        args: List[Any] = []
+        if assignee:
+            sql += " WHERE q.assignee=?"
+            args.append(assignee)
+        sql += " ORDER BY q.state='done', q.added_at, q.tid LIMIT ?"
+        args.append(max(1, int(limit)))
+        return [dict(r) for r in self.db.conn.execute(sql, args).fetchall()]
+
+    # ---------------------------------------------------------------- 标注
+    def item(self, tid: int) -> Dict[str, Any]:
+        """一条待标注的内容：帖子 + 楼层 + 规则标签 + 已有的人工标注。"""
+        t = self.db.conn.execute("SELECT * FROM threads WHERE tid=?",
+                                 (int(tid),)).fetchone()
+        if not t:
+            return {}
+        d = dict(t)
+        d["posts"] = [dict(r) for r in self.db.conn.execute(
+            "SELECT pid, floor, author, post_time, content, chars FROM posts "
+            "WHERE tid=? ORDER BY pid", (int(tid),))]
+        d["rule_tags_by_dim"] = {}
+        for dim, tag in self.db.conn.execute(
+                "SELECT dim, tag FROM thread_dim_tags WHERE tid=? ORDER BY dim, tag",
+                (int(tid),)):
+            d["rule_tags_by_dim"].setdefault(str(dim), []).append(str(tag))
+        d["rule_tags"] = " / ".join(
+            t for tags in d["rule_tags_by_dim"].values() for t in tags)
+        d["anno_tags"] = [dict(r) for r in self.db.conn.execute(
+            "SELECT dim, tag, annotator, annotated_at, status FROM thread_anno_tags "
+            "WHERE tid=? ORDER BY dim, tag", (int(tid),))]
+        d["review"] = self.db.get_review(int(tid))
+        return d
+
+    def submit(self, node: str, tid: int, verdict: str = "", reason: str = "",
+               tags: List[List[str]] = None) -> Dict[str, Any]:
+        """提交一条人工标注。
+
+        ★ 三件事一起做（一条标注是一个整体）：
+          ① 核验结论写 sample_review（**理由必填**）
+          ② 人工三维标签写 thread_anno_tags（status=submitted → **已生效**）
+          ③ 队列里这条置 done
+
+        ★ 标签是**整帖替换**：人改标签 = 重标这一帖的标签，
+          不是往规则标签上再叠一层（叠着会让「人工值」和「规则值」混成一团）。
+        """
+        tid = int(tid)
+        verdict = (verdict or "").strip()
+        reason = (reason or "").strip()
+        if verdict and verdict not in DB.VERDICTS:
+            raise ValueError("核验结论只能是 %s，收到 %r" % (DB.VERDICTS, verdict))
+        if verdict and not reason:
+            raise ValueError("有核验结论就必须写理由")
+        clean: List[Tuple[str, str]] = []
+        for pair in (tags or []):
+            try:
+                dim = str(pair[0]).strip()
+                tag = str(pair[1]).strip()
+            except (IndexError, TypeError):
+                continue
+            if not dim or not tag:
+                continue
+            if dim not in DIM_CN:
+                raise ValueError("维度只能是 %s，收到 %r" % (list(DIM_CN), dim))
+            if (dim, tag) not in clean:
+                clean.append((dim, tag))
+        now = _now()
+        with self.db.lock:
+            if verdict:
+                self.db.conn.execute(
+                    "INSERT INTO sample_review(tid,verdict,reason,method,annotator,"
+                    "annotated_at,status,updated_at) "
+                    "VALUES(?,?,?,'人工',?,?,'submitted',?) "
+                    "ON CONFLICT(tid) DO UPDATE SET verdict=excluded.verdict, "
+                    "reason=excluded.reason, method='人工', annotator=excluded.annotator, "
+                    "annotated_at=excluded.annotated_at, status='submitted', "
+                    "updated_at=excluded.updated_at",
+                    (tid, verdict, reason, node, now, now))
+            for dim in DIM_CN:
+                self.db.conn.execute(
+                    "DELETE FROM thread_anno_tags WHERE tid=? AND dim=?", (tid, dim))
+            self.db.conn.executemany(
+                "INSERT OR REPLACE INTO thread_anno_tags(tid,dim,tag,annotator,"
+                "annotated_at,status,updated_at) VALUES(?,?,?,?,?,'submitted',?)",
+                [(tid, d, g, node, now, now) for d, g in clean])
+            self.db.conn.execute(
+                "UPDATE anno_queue SET state='done', done_at=? WHERE tid=?", (now, tid))
+            self.db.conn.commit()
+        return {"ok": True, "tid": tid, "verdict": verdict,
+                "tags": [{"dim": d, "tag": g} for d, g in clean]}
+
+    def review(self, tid: int, approved: bool, note: str = "",
+               reviewer: str = "") -> Dict[str, Any]:
+        """管理员复核一条标注。
+
+        ★ 通过 → status=approved；打回 → status=rejected（**意见必填**），
+          人工标签**失效** → 导出回落到规则标签（但记录还在，不删）。
+        ★ 复核人/复核日期只有**管理员本人点了**才写 —— 那是他的签署动作。
+        """
+        tid = int(tid)
+        note = (note or "").strip()
+        if not approved and not note:
+            raise ValueError("打回必须写意见")
+        now = _now()
+        today = time.strftime("%Y-%m-%d")
+        status = "approved" if approved else "rejected"
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE sample_review SET status=?, review_note=?, reviewed_by=?, "
+                "reviewed_at=?, updated_at=? WHERE tid=?",
+                (status, note, (reviewer or "").strip(), today, now, tid))
+            self.db.conn.execute(
+                "UPDATE thread_anno_tags SET status=?, reviewer=?, review_note=?, "
+                "updated_at=? WHERE tid=?",
+                (status, (reviewer or "").strip(), note, now, tid))
+            self.db.conn.commit()
+        return {"ok": True, "tid": tid, "status": status}
+
+    # ---------------------------------------------------------------- 统计
+    def stats(self) -> Dict[str, Any]:
+        """进度：队列、标注状态、核验结论三块。"""
+        c = self.db.conn
+        q = {r["state"]: int(r["n"]) for r in c.execute(
+            "SELECT state, COUNT(*) n FROM anno_queue GROUP BY state")}
+        a = {r["status"]: int(r["n"]) for r in c.execute(
+            "SELECT status, COUNT(DISTINCT tid) n FROM thread_anno_tags GROUP BY status")}
+        pending_review = int(c.execute(
+            "SELECT COUNT(DISTINCT tid) FROM thread_anno_tags WHERE status='submitted'"
+        ).fetchone()[0])
+        return {"queue": q, "anno": a, "pending_review": pending_review,
+                "review": self.db.review_stats()}
+
+    def pending(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """待复核的标注（管理员用）。"""
+        return [dict(r) for r in self.db.conn.execute(
+            "SELECT a.tid, a.dim, a.tag, a.annotator, a.annotated_at, "
+            "t.title, t.dept_name FROM thread_anno_tags a "
+            "LEFT JOIN threads t ON t.tid=a.tid "
+            "WHERE a.status='submitted' "
+            "ORDER BY a.annotated_at DESC, a.tid LIMIT ?",
+            (max(1, int(limit)),)).fetchall()]
+
+    def vocab(self) -> Dict[str, Any]:
+        """候选标签清单：各维度**已经出现过的取值**。
+
+        ★ 不给空白输入框：标签空间一旦自由发挥，「关系：外星人」这种值会
+          混进库里，统计就没法看了。想要的取值先由规则产生，或由管理员加词表。
+        """
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for dim, tag, n in self.db.conn.execute(
+                "SELECT dim, tag, COUNT(DISTINCT tid) FROM thread_dim_tags "
+                "GROUP BY dim, tag ORDER BY dim, tag"):
+            out.setdefault(str(dim), []).append({"tag": str(tag), "n": int(n)})
+        return {"dims": DIM_CN, "candidates": out}

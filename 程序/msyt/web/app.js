@@ -236,6 +236,7 @@ function showSub(sub) {
     pollHelper();
   }
   if (target === 'me') { renderMe(); }
+  if (target === 'anno') { loadAnnoQueue(); loadAnnoPending(); }
 }
 
 $$('#collect-subtabs button').forEach(btn => {
@@ -3406,3 +3407,215 @@ setInterval(() => {
   // 有采集任务在跑时，总览数字会变，跟着刷
   if (state.jobTimer) loadOverview();
 }, 5000);
+
+/* ---------------- 人工标注台 ----------------
+   组员在网页上标，管理员复核。交互照开源标注工具的成熟做法：
+   队列 → 逐条 → 快捷键 → 提交 → 复核。 */
+const annoState = { tid: 0, verdict: '', sel: {}, vocab: null, item: null, queue: [] };
+
+function annoChips(dim, cands, sel) {
+  return (cands || []).map(c =>
+    '<span class="tagchip' + (sel.indexOf(c.tag) >= 0 ? ' on' : '')
+    + '" data-dim="' + esc(dim) + '" data-tag="' + esc(c.tag) + '">'
+    + esc(c.tag) + '</span>').join('');
+}
+
+async function loadAnnoQueue() {
+  try {
+    const d = await api('/api/anno/queue');
+    const items = d.items || [];
+    annoState.queue = items;
+    const rows = items.map(x =>
+      '<tr class="clickable" data-anno="' + esc(x.tid) + '">'
+      + '<td class="num">' + esc(x.tid) + '</td>'
+      + '<td class="sub2">' + esc((x.title || '').slice(0, 44) || '—') + '</td>'
+      + '<td>' + (x.state === 'done'
+        ? '<span class="badge done">已标</span>'
+        : '<span class="badge pending">待标</span>') + '</td>'
+      + '<td class="sub2">' + esc(x.task_code || '') + '</td>'
+      + '<td class="sub2">' + esc(x.dept_name || '') + '</td></tr>').join('');
+    $('#t-anno-queue').innerHTML = '<thead><tr><th>TID</th><th>标题</th><th>状态</th>'
+      + '<th>任务</th><th>部门</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="5" class="hint">队列是空的 —— 上面按 TID 加一条</td></tr>')
+      + '</tbody>';
+    $$('#t-anno-queue tr[data-anno]').forEach(tr => {
+      tr.onclick = () => openAnno(tr.dataset.anno);
+    });
+    const s = await api('/api/anno/stats');
+    $('#anno-stats').textContent = '待标 ' + ((s.queue || {}).queued || 0)
+      + ' · 已标 ' + ((s.queue || {}).done || 0)
+      + ' · 待复核 ' + (s.pending_review || 0);
+  } catch (e) { /* 没登录就静默 */ }
+}
+
+async function openAnno(tid) {
+  try {
+    const d = await api('/api/anno/item/' + encodeURIComponent(tid));
+    const it = d.item || {};
+    annoState.item = it;
+    annoState.tid = it.tid;
+    annoState.vocab = d.vocab;
+    // ★ 预选：有人工标签就用人工的，没有才用规则值（人一眼能看出机器原来判成什么）
+    const sel = {};
+    (it.anno_tags || []).forEach(t => {
+      (sel[t.dim] = sel[t.dim] || []).push(t.tag);
+    });
+    Object.entries(it.rule_tags_by_dim || {}).forEach(([dim, tags]) => {
+      if (!sel[dim]) sel[dim] = tags.slice();
+    });
+    annoState.sel = sel;
+    annoState.verdict = (it.review && it.review.verdict) || '';
+    renderAnno();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderAnno() {
+  const it = annoState.item;
+  if (!it) return;
+  const dims = (annoState.vocab && annoState.vocab.dims)
+    || { relation: '关系', process: '过程', impact: '影响' };
+  const cands = (annoState.vocab && annoState.vocab.candidates) || {};
+  const posts = (it.posts || []).map(p =>
+    '<div class="anno-post"><div class="hint">' + esc(p.author || '')
+    + ' · ' + esc(p.post_time || '') + '</div><div>' + esc(p.content || '') + '</div></div>'
+  ).join('');
+  const dimsHtml = Object.keys(dims).map(dim =>
+    '<div class="anno-dim"><span class="lbl">' + esc(dims[dim]) + '</span>'
+    + annoChips(dim, cands[dim], annoState.sel[dim] || []) + '</div>').join('');
+  const verdictBtn = ['纳入', '排除', '待核验'].map((v, i) =>
+    '<button class="tiny verdict-btn' + (annoState.verdict === v ? ' on' : '')
+    + '" data-v="' + v + '">' + (i + 1) + ' ' + v + '</button>').join(' ');
+  $('#anno-body').innerHTML =
+    '<div class="anno-title"><b>' + esc(it.title || '') + '</b></div>'
+    + '<div class="hint">TID ' + esc(it.tid) + ' ｜ ' + esc(it.dept_name || '')
+    + ' ｜ ' + esc(it.state || '') + ' ｜ ' + esc(it.category || '')
+    + ' ｜ ' + esc(it.pub_time || '') + '</div>'
+    + '<div class="hint">规则标签（机器算的）：' + esc(it.rule_tags || '—')
+    + '　<a href="' + esc(it.url || '#') + '" target="_blank" rel="noopener">看原帖</a></div>'
+    + '<div class="anno-posts">' + (posts || '<div class="hint">这个帖没有楼层正文</div>') + '</div>'
+    + '<div class="anno-form">'
+    + '<div class="row"><span class="lbl">核验结论</span>' + verdictBtn + '</div>'
+    + '<textarea id="anno-reason" rows="2" placeholder="理由（有结论就必填）">'
+    + esc((it.review && it.review.reason) || '') + '</textarea>'
+    + dimsHtml
+    + '<div class="row"><button class="primary" id="anno-submit">提交并下一条（Ctrl+Enter）</button>'
+    + '<span class="hint" id="anno-hint"></span></div></div>';
+  $$('#anno-body .verdict-btn').forEach(b => {
+    b.onclick = () => {
+      annoState.verdict = b.dataset.v;
+      $$('#anno-body .verdict-btn').forEach(x =>
+        x.classList.toggle('on', x.dataset.v === annoState.verdict));
+    };
+  });
+  $$('#anno-body .tagchip').forEach(c => {
+    c.onclick = () => {
+      const dim = c.dataset.dim, tag = c.dataset.tag;
+      const arr = annoState.sel[dim] || (annoState.sel[dim] = []);
+      const i = arr.indexOf(tag);
+      if (i >= 0) arr.splice(i, 1); else arr.push(tag);
+      c.classList.toggle('on');
+    };
+  });
+  $('#anno-submit').onclick = submitAnno;
+}
+
+async function submitAnno() {
+  if (!annoState.tid) { toast('先从队列里点一条', true); return; }
+  const box = document.getElementById('anno-reason');
+  const reason = box ? box.value : '';
+  const tags = [];
+  Object.entries(annoState.sel || {}).forEach(([dim, arr]) => {
+    arr.forEach(t => tags.push([dim, t]));
+  });
+  try {
+    await api('/api/anno/submit', {
+      method: 'POST',
+      body: JSON.stringify({ tid: annoState.tid, verdict: annoState.verdict,
+        reason: reason, tags: tags }),
+    });
+    toast('已提交（人工标签已生效，规则值仍留一列可复核）');
+    const done = annoState.tid;
+    await loadAnnoQueue();
+    const next = annoState.queue.find(x => x.state !== 'done' && x.tid !== done);
+    if (next) await openAnno(next.tid);
+    else { annoState.item = null; $('#anno-body').innerHTML = '<p class="hint">队列里没有待标的了。</p>'; }
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadAnnoPending() {
+  const card = document.getElementById('anno-review-card');
+  if (!card) return;
+  if (!state.me || state.me.role !== 'admin') { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  try {
+    const d = await api('/api/anno/pending');
+    const rows = (d.items || []).map(x =>
+      '<tr><td class="num">' + esc(x.tid) + '</td>'
+      + '<td class="sub2">' + esc((x.title || '').slice(0, 36) || '—') + '</td>'
+      + '<td>' + esc(x.dim) + '</td>'
+      + '<td class="sub2">' + esc(x.tag) + '</td>'
+      + '<td class="sub2">' + esc(x.annotator || '') + '</td>'
+      + '<td class="sub2">' + esc(x.annotated_at || '') + '</td>'
+      + '<td class="nowrap"><button class="tiny" data-ok="' + esc(x.tid) + '">通过</button>'
+      + ' <button class="tiny" data-no="' + esc(x.tid) + '">打回</button></td></tr>').join('');
+    $('#t-anno-pending').innerHTML = '<thead><tr><th>TID</th><th>标题</th><th>维度</th>'
+      + '<th>标签</th><th>标注人</th><th>标注时间</th><th>操作</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="7" class="hint">没有待复核的标注</td></tr>') + '</tbody>';
+    $$('#t-anno-pending [data-ok]').forEach(b => {
+      b.onclick = async () => {
+        try {
+          await api('/api/anno/review', { method: 'POST',
+            body: JSON.stringify({ tid: b.dataset.ok, approved: true }) });
+          toast('已通过'); loadAnnoPending();
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+    $$('#t-anno-pending [data-no]').forEach(b => {
+      b.onclick = async () => {
+        const note = prompt('打回意见（必填）—— 打回后人工标签失效，导出回落到规则标签：');
+        if (!note) return;
+        try {
+          await api('/api/anno/review', { method: 'POST',
+            body: JSON.stringify({ tid: b.dataset.no, approved: false, note: note }) });
+          toast('已打回'); loadAnnoPending();
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+  } catch (e) { /* 忽略 */ }
+}
+
+const annoAddBtn = document.getElementById('anno-add');
+if (annoAddBtn) annoAddBtn.onclick = async () => {
+  const raw = (document.getElementById('anno-tid') || {}).value || '';
+  const tids = raw.split(/[\s,，]+/).filter(Boolean);
+  const assignee = (document.getElementById('anno-assignee') || {}).value || '';
+  if (!tids.length) { toast('先填 TID', true); return; }
+  try {
+    const d = await api('/api/anno/queue', { method: 'POST',
+      body: JSON.stringify({ tids: tids, assignee: assignee }) });
+    toast('已加入 ' + d.queued + ' 条（任务 ' + d.task_code + '）'
+      + (d.skipped ? '，跳过 ' + d.skipped + ' 条（没采到正文）' : ''));
+    document.getElementById('anno-tid').value = '';
+    loadAnnoQueue();
+  } catch (e) { toast(e.message, true); }
+};
+const annoRefreshBtn = document.getElementById('anno-refresh');
+if (annoRefreshBtn) annoRefreshBtn.onclick = loadAnnoQueue;
+
+/* 快捷键：1 纳入 / 2 排除 / 3 待核验 / Ctrl+Enter 提交 */
+document.addEventListener('keydown', (ev) => {
+  const panel = document.getElementById('sub-anno');
+  if (!panel || panel.classList.contains('hidden')) return;
+  const tag = (ev.target.tagName || '').toLowerCase();
+  if (ev.ctrlKey && ev.key === 'Enter') {
+    ev.preventDefault(); submitAnno(); return;
+  }
+  if (tag === 'input' || tag === 'textarea') return;
+  if (ev.key === '1' || ev.key === '2' || ev.key === '3') {
+    const v = ['纳入', '排除', '待核验'][Number(ev.key) - 1];
+    annoState.verdict = v;
+    $$('#anno-body .verdict-btn').forEach(x =>
+      x.classList.toggle('on', x.dataset.v === v));
+  }
+});
+

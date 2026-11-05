@@ -222,6 +222,7 @@
     <button data-sub="jobs" class="active">采集作业</button>
     <button data-sub="assist">协作采集</button>
     <button data-sub="me">我的账号</button>
+    <button data-sub="anno">标注台</button>
   </div>
 
   <!-- ---------- 子页：采集作业 ---------- -->
@@ -487,6 +488,38 @@
         <span class="hint" id="as-q-hint"></span>
       </div>
       <div class="tablewrap"><table id="t-assist"></table></div>
+    </div>
+
+    <!-- ---------- 子页：标注台 ---------- -->
+    <div class="subpanel hidden" id="sub-anno">
+      <div class="card">
+        <h3>人工标注台</h3>
+        <p class="hint">
+          组员在网页上标，管理员复核。<b>人工标签优先覆盖规则标签</b>，规则原值在导出里另留一列
+          （「规则三维标签」），人工值怎么来的可复核。<br>
+          快捷键：<b>1</b> 纳入　<b>2</b> 排除　<b>3</b> 待核验　<b>Ctrl+Enter</b> 提交并下一条
+        </p>
+        <div class="row">
+          <input id="anno-tid" placeholder="按 TID 加入队列（如 8074300）" style="max-width:280px">
+          <input id="anno-assignee" placeholder="派给（可空=自己；管理员可填成员邮箱）" style="max-width:320px">
+          <button id="anno-add">加入标注队列</button>
+          <button id="anno-refresh">刷新队列</button>
+          <span class="hint" id="anno-stats"></span>
+        </div>
+        <div class="tablewrap"><table id="t-anno-queue"></table></div>
+      </div>
+
+      <div class="card" id="anno-work">
+        <h3>当前待标</h3>
+        <div id="anno-body"><p class="hint">从上面的队列里点一条开始标注。</p></div>
+      </div>
+
+      <div class="card hidden" id="anno-review-card">
+        <h3>待复核（管理员）</h3>
+        <p class="hint">组员标完在这里复核：<b>通过</b>＝确认；<b>打回</b>＝人工标签失效、
+          导出回落到规则标签（记录仍留着，不删）。打回必须写意见。</p>
+        <div class="tablewrap"><table id="t-anno-pending"></table></div>
+      </div>
     </div>
 
     <div class="card" id="online-card">

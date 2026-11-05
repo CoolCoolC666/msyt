@@ -412,9 +412,44 @@ CREATE TABLE IF NOT EXISTS sample_review (
     method      TEXT NOT NULL DEFAULT '',  -- 人工 / AI初筛 / 规则自动
     ai_label    TEXT NOT NULL DEFAULT '',  -- AI 初筛结论
     ai_model    TEXT NOT NULL DEFAULT '',  -- 用了哪个模型（可追溯）
+    annotator   TEXT NOT NULL DEFAULT '',  -- 标注人（组员本人操作，系统记事实）
+    annotated_at TEXT NOT NULL DEFAULT '', -- 标注日期
+    status      TEXT NOT NULL DEFAULT '',  -- submitted | approved | rejected（空 = 老数据）
+    review_note TEXT NOT NULL DEFAULT '',  -- 复核意见（打回时必填）
     updated_at  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_review_verdict ON sample_review(verdict);
+-- ★ idx_review_status **不能写在这**：旧库上 sample_review 还没有 status 列，
+--   建索引会直接炸（no such column: status）→ 索引挪到 _ensure_columns 之后建。
+
+-- ---------------------------------------------------------------- 人工标注台
+-- ★ 2026-11-06 新增（人工标注功能）：与上面两张表**不是一回事**，别混：
+--   thread_dim_tags = **规则算的**三维标签（机器判定）
+--   thread_anno_tags = **人标的**三维标签（导出时人工优先覆盖规则值，规则值另留一列）
+--   anno_queue       = 标注队列（谁标哪一条）
+CREATE TABLE IF NOT EXISTS thread_anno_tags (
+    tid          INTEGER NOT NULL,
+    dim          TEXT NOT NULL,          -- relation | process | impact
+    tag          TEXT NOT NULL,
+    annotator    TEXT NOT NULL DEFAULT '',  -- 标注人（操作留痕）
+    annotated_at TEXT NOT NULL DEFAULT '',  -- 标注日期
+    reviewer     TEXT NOT NULL DEFAULT '',  -- 复核人（人工签署位）
+    review_note  TEXT NOT NULL DEFAULT '',  -- 复核意见（打回时必填）
+    status       TEXT NOT NULL DEFAULT 'submitted',  -- submitted | approved | rejected
+    updated_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tat_tid ON thread_anno_tags(tid);
+CREATE INDEX IF NOT EXISTS idx_tat_status ON thread_anno_tags(status);
+
+CREATE TABLE IF NOT EXISTS anno_queue (
+    tid       INTEGER PRIMARY KEY,
+    assignee  TEXT NOT NULL DEFAULT '',  -- 标注人（登录账号）
+    state     TEXT NOT NULL DEFAULT 'queued',  -- queued | done
+    task_code TEXT NOT NULL DEFAULT '',  -- 标注任务编号（L1 / L2…）
+    added_at  TEXT NOT NULL DEFAULT '',
+    done_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_aq_assignee ON anno_queue(assignee, state);
 
 -- ---------------------------------------------------------------- 词表
 --: ★ 2026-11-05 新增（优化报告 P1-1）：课件「建立『词表』，关键词设计」。
@@ -654,6 +689,14 @@ class DB:
             "districts": {
                 "py_initials": "TEXT",
             },
+            "sample_review": {
+                # ★ 人工标注台（2026-11-06）：标注人/标注日期/标注状态/复核意见
+                #   `reviewed_by` 的老规矩不变 —— 仍是**人工签署位**，不代填。
+                "annotator": "TEXT",
+                "annotated_at": "TEXT",
+                "status": "TEXT",
+                "review_note": "TEXT",
+            },
             "assist_tasks": {
                 # ★ 选题四要素（2026-11-06 · 优化报告 P2-3）
                 #   规范名由这四要素**现算**（msyt/topic.py），不另存一列，
@@ -677,6 +720,10 @@ class DB:
             for col, decl in cols.items():
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        # ★ 索引**等迁移补完列再建** —— 旧库上 sample_review 还没有 status 列，
+        #   索引写在 SCHEMA 里会在建库那一步直接炸（no such column: status）。
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_review_status "
+                          "ON sample_review(status)")
 
     def close(self):
         try:
@@ -1070,8 +1117,10 @@ class DB:
 
     # ---------------------------------------------------------------- 导出
     #: 导出新增的列（2026-11-05 · 优化报告 P0-2；2026-11-05 再加「词表命中」P1-1）
+    #: 「三维标签」= **人工优先**后的最终值；「规则三维标签」= 规则算的原值
+    #:   （两者都留 → 人工值怎么来的、规则值是什么，都可复核）
     EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断",
-                         "词表命中", "三维标签"]
+                         "词表命中", "三维标签", "规则三维标签"]
 
     def export_csv(self, path: str) -> int:
         """导出正式样本 CSV（**交付物**），返回导出行数。
@@ -1127,6 +1176,11 @@ class DB:
         kw_words = self.keyword_hit_words()
         # 三维标签（优化报告 P2-2）：一次查完 → {tid: 标签1 / 标签2}
         dim_tags = tag_map_text(self.conn)
+        # 人工三维标签（人工标注台）→ **人工优先**合并：人工值覆盖规则值，
+        #   规则原值仍单列写进「规则三维标签」→ 人工值怎么来的可复核。
+        from .anno import anno_tag_map_text, merge_tags
+        anno_tags = anno_tag_map_text(self.conn)
+        final_tags = merge_tags(dim_tags, anno_tags)
 
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
@@ -1152,6 +1206,7 @@ class DB:
                     path_desc,
                     d.get("_warn") or "",
                     " / ".join(kw_words.get(tid) or []),
+                    final_tags.get(tid) or "",
                     dim_tags.get(tid) or "",
                 ])
         return len(rows)

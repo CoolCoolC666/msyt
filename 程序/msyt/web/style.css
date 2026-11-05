@@ -631,3 +631,30 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); }
 #integrity-out .int-pagerbar { margin: 6px 0 2px; gap: 6px; align-items: center; }
 #integrity-out .int-pagerbar select { padding: 2px 4px; font-size: 12px; }
 #integrity-out .int-pagerbar button { padding: 3px 9px; }
+
+/* ---------------------------------------------------------------- 人工标注台
+   颜色 = 语义：未选中的候选标签是**灰**（中性事实），选中的是**深绿主色**
+   （= 这一条我确认过了）。★ 不给「排除」用红色按钮 —— 红在这个界面里
+   表示「出错 / 站方限制」，标「排除」不是出错。 */
+.tagchip {
+  display: inline-block; margin: 2px 4px 2px 0; padding: 2px 9px;
+  border-radius: 999px; border: 1px solid var(--line); background: #f7f8fa;
+  color: var(--ink-2); font-size: 12px; cursor: pointer; user-select: none;
+}
+.tagchip:hover { border-color: var(--accent); color: var(--accent); }
+.tagchip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.anno-title { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
+.anno-posts {
+  max-height: 300px; overflow: auto; margin: 10px 0; padding: 4px 12px;
+  border: 1px solid var(--line-2); border-radius: 8px; background: #fcfdfd;
+}
+.anno-post { padding: 8px 0; border-bottom: 1px dashed var(--line-2); font-size: 13.5px; }
+.anno-post:last-child { border-bottom: 0; }
+.anno-form textarea {
+  width: 100%; margin: 8px 0; padding: 8px 10px; font: inherit; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 8px; resize: vertical;
+}
+.anno-dim { margin: 10px 0; }
+.anno-dim .lbl { display: inline-block; width: 42px; font-weight: 600; color: var(--ink-2); }
+.verdict-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+

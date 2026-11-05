@@ -33,7 +33,7 @@ OLD_COLS = ["tid", "title", "url", "pub_time", "pub_day", "dept_name",
             "light_code", "light_name", "author", "replies", "views",
             "detail_state", "posts_n", "chars", "first_post_id", "last_post_id",
             "pages_total", "full_text"]
-NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断", "词表命中", "三维标签"]
+NEW_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断", "词表命中", "三维标签", "规则三维标签"]
 
 
 def check(cond: bool, msg: str) -> None:
@@ -124,7 +124,8 @@ def main() -> int:
     for c in NEW_COLS:
         check(c in head, f"新列 {c} 在")
     check(head[len(OLD_COLS):] == NEW_COLS, "新列追加在末尾、顺序正确")
-    check(len(head) == 30, f"总列数 = 30（实得 {len(head)}）")
+    # 2026-11-06 人工标注台：加了「规则三维标签」一列 → 30 列变 31 列
+    check(len(head) == 31, f"总列数 = 31（实得 {len(head)}）")
 
     # ---- ③ 每列都有内容 ----
     print("\n--- ③ 内容逐列核对（取 tid=1001 那行）---")
