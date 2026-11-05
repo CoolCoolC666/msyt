@@ -62,7 +62,9 @@ function toast(msg, bad = false) {
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g,
-  c => ({ '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;' }[c]));
+  // ★ 实体用 \u0026 转义写法：源码里不出现连续的 HTML 实体字面量，
+  //   免得被复制粘贴或工具链把实体还原成裸字符（这个坑真踩过）。
+  c => ({ '&': '\u0026amp;', '<': '\u0026lt;', '>': '\u0026gt;', '"': '\u0026quot;', "'": '\u0026#39;' }[c]));
 
 const num = n => (n ?? 0).toLocaleString('zh-CN');
 
@@ -302,12 +304,22 @@ function barChart(el, obj, color) {
   const items = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
   if (!items.length) { el.innerHTML = '<p class="hint">暂无数据</p>'; return; }
   const max = Math.max(...items.map(x => x[1]));
-  el.innerHTML = items.map(([k, v]) => `
-    <div class="bar-row">
-      <div class="name" title="${esc(k)}">${esc(k)}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(v / max * 100).toFixed(1)}%${color ? ';background:' + color : ''}"></div></div>
-      <div class="val">${num(v)}</div>
-    </div>`).join('');
+  const fill = color || 'var(--accent)';
+  // ★ 版式（2026-11-06 定）：**名称 + 数字在上，条形图在数字下方**。
+  //   条形用纯 SVG 自绘 —— 零外部依赖、离线可跑（这是项目的硬约束）。
+  //   圆角交给 svg 元素的 border-radius + overflow:hidden，
+  //   不用 rect 的 rx —— rx 在 preserveAspectRatio="none" 下会被拉成椭圆。
+  el.innerHTML = items.map(([k, v]) => {
+    const pct = max ? (v / max * 100) : 0;
+    return `<div class="bar-row2">
+      <div class="hd"><span class="name" title="${esc(k)}">${esc(k)}</span>
+      <span class="val">${num(v)}</span></div>
+      <svg class="bar-svg" viewBox="0 0 100 8" preserveAspectRatio="none" role="img">
+        <title>${esc(k)}：${num(v)}（占本组最大值 ${pct.toFixed(1)}%）</title>
+        <rect x="0" y="0" width="${pct.toFixed(2)}" height="8" style="fill:${fill}"></rect>
+      </svg>
+    </div>`;
+  }).join('');
 }
 
 async function loadOverview() {
