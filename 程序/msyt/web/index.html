@@ -42,13 +42,42 @@
 <!-- ================= 总览 ================= -->
 <section class="panel" id="tab-overview">
   <div class="cards" id="ov-cards"></div>
-  <!-- ★ 展示顺序（2026-11-06 用户定）：「站方自报留言 745,677」那张指标卡
-       **下面紧跟**「站方自报统计」—— 同一口径的两块挨着看，
-       别被别的分布卡隔开、也别让人误以为它跟本站采集量是一回事。 -->
+  <!-- ★ 展示顺序（2026-11-06 用户定）：
+       ①「站方自报留言」那张指标卡**下面紧跟**「站方自报统计」—— 同一口径的两块挨着看；
+       ② 五张分布卡（帖子类别分布 → 区县市）**整块紧跟在「站方自报统计」下面**；
+       ③ 三维标签分布、结论边界再往后排。 -->
   <div class="card">
     <h3>站方自报统计</h3>
     <p class="hint">口径：<b>站方自报的全站历史总量</b>，<b>不是本站采集量</b>（两者差 5 个数量级）。</p>
     <div id="ov-site" class="kv"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>帖子类别分布</h3>
+      <p class="hint">口径：<b>已采集到详情</b>的帖子的站方分类（站方分好我们照搬）。</p>
+      <div id="ov-category" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>受理状态分布</h3>
+      <p class="hint">口径：站方给的受理状态；<b>空 = 站方未标</b>，不是「没人管」。</p>
+      <div id="ov-state" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>部门分组</h3>
+      <p class="hint">口径：站方标注的<b>办理部门</b>；未分组的单列一类。</p>
+      <div id="ov-group" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>时效灯</h3>
+      <p class="hint">时效灯只对「已回复」的帖存在，空值记为未点亮。</p>
+      <div id="ov-light" class="bars"></div>
+    </div>
+    <div class="card">
+      <h3>区县市</h3>
+      <p class="hint">口径：站方标的区县市；跨区问题多在「其他/未标」。</p>
+      <div id="ov-district" class="bars"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -90,34 +119,6 @@
       <b>② 可见性偏差</b>（站方不公开的历史帖正文，记为「存在且不可见」）；
       <b>③ 计数口径偏差</b>（站方列表页的回复数删楼后不跟着减）。
     </p>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <h3>帖子类别分布</h3>
-      <p class="hint">口径：<b>已采集到详情</b>的帖子的站方分类（站方分好我们照搬）。</p>
-      <div id="ov-category" class="bars"></div>
-    </div>
-    <div class="card">
-      <h3>受理状态分布</h3>
-      <p class="hint">口径：站方给的受理状态；<b>空 = 站方未标</b>，不是「没人管」。</p>
-      <div id="ov-state" class="bars"></div>
-    </div>
-    <div class="card">
-      <h3>部门分组</h3>
-      <p class="hint">口径：站方标注的<b>办理部门</b>；未分组的单列一类。</p>
-      <div id="ov-group" class="bars"></div>
-    </div>
-    <div class="card">
-      <h3>时效灯</h3>
-      <p class="hint">时效灯只对「已回复」的帖存在，空值记为未点亮。</p>
-      <div id="ov-light" class="bars"></div>
-    </div>
-    <div class="card">
-      <h3>区县市</h3>
-      <p class="hint">口径：站方标的区县市；跨区问题多在「其他/未标」。</p>
-      <div id="ov-district" class="bars"></div>
-    </div>
   </div>
 
   <div class="card">
