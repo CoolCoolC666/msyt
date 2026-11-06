@@ -42,6 +42,14 @@
 <!-- ================= 总览 ================= -->
 <section class="panel" id="tab-overview">
   <div class="cards" id="ov-cards"></div>
+  <!-- ★ 展示顺序（2026-11-06 用户定）：「站方自报留言 745,677」那张指标卡
+       **下面紧跟**「站方自报统计」—— 同一口径的两块挨着看，
+       别被别的分布卡隔开、也别让人误以为它跟本站采集量是一回事。 -->
+  <div class="card">
+    <h3>站方自报统计</h3>
+    <p class="hint">口径：<b>站方自报的全站历史总量</b>，<b>不是本站采集量</b>（两者差 5 个数量级）。</p>
+    <div id="ov-site" class="kv"></div>
+  </div>
 
   <div class="card">
     <h3>三维标签分布</h3>
@@ -109,11 +117,6 @@
       <h3>区县市</h3>
       <p class="hint">口径：站方标的区县市；跨区问题多在「其他/未标」。</p>
       <div id="ov-district" class="bars"></div>
-    </div>
-    <div class="card">
-      <h3>站方自报统计</h3>
-      <p class="hint">口径：<b>站方自报的全站历史总量</b>，<b>不是本站采集量</b>（两者差 5 个数量级）。</p>
-      <div id="ov-site" class="kv"></div>
     </div>
   </div>
 
