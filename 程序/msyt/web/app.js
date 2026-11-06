@@ -238,7 +238,8 @@ function showSub(sub) {
     pollHelper();
   }
   if (target === 'me') { renderMe(); }
-  if (target === 'anno') { loadAnnoQueue(); loadAnnoPending(); }
+  if (target === 'anno') { loadAnnoQueue(); loadAnnoPending();
+    loadAnnoBatches(); loadAnnoAgreement(); }
 }
 
 $$('#collect-subtabs button').forEach(btn => {
@@ -409,6 +410,11 @@ async function loadMeta() {
   fill('#f-group', m.groups, '全部分组');
   fill('#f-district', m.districts, '全部区县市');
   fill('#f-dept', m.depts, '全部部门');
+  // ★ 批量派活的筛选下拉（2026-11-06）：同一套字典、同一套口径
+  fill('#ab-category', m.categories, '全部类别');
+  fill('#ab-state', m.states, '全部状态');
+  fill('#ab-group', m.groups, '全部分组');
+  fill('#ab-district', m.districts, '全部区县市');
   // ★ 把这几个下拉框变成「**可输入筛选**」的（2026-10-24 用户要求：
   //   109 个部门用原生下拉框没法找；站方那个搜索框支持「名称、拼音或首字母」）。
   [['#f-category', '类别'], ['#f-state', '受理状态'], ['#f-mailbox', '留言箱'],
@@ -3457,6 +3463,74 @@ async function loadAnnoQueue() {
     $('#anno-stats').textContent = '待标 ' + ((s.queue || {}).queued || 0)
       + ' · 已标 ' + ((s.queue || {}).done || 0)
       + ' · 待复核 ' + (s.pending_review || 0);
+    loadAnnoBatches(); loadAnnoAgreement();
+  } catch (e) { /* 没登录就静默 */ }
+}
+
+/* 任务批次：一个批次 = 一个标注任务（L1/L2…），看谁派的、标了多少 */
+async function loadAnnoBatches() {
+  const card = document.getElementById('anno-batches-card');
+  if (!card) return;
+  try {
+    const d = await api('/api/anno/batches');
+    const items = d.items || [];
+    const rows = items.map(b =>
+      '<tr><td class="num">' + esc(b.task_code || '—') + '</td>'
+      + '<td class="sub2">' + esc(b.assignee || '（未指派）') + '</td>'
+      + '<td class="num">' + num(b.total) + '</td>'
+      + '<td class="num">' + num(b.done) + '</td>'
+      + '<td class="num">' + num(b.queued) + '</td>'
+      + '<td class="num">' + esc(b.pct) + '%</td></tr>').join('');
+    $('#t-anno-batches').innerHTML =
+      '<thead><tr><th>任务</th><th>派给</th><th>总量</th><th>已标</th>'
+      + '<th>待标</th><th>进度</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="6" class="hint">还没有标注任务</td></tr>')
+      + '</tbody>';
+  } catch (e) { /* 没登录就静默 */ }
+}
+
+/* 一致性：人工标签 vs 规则标签（机器判得准不准） */
+async function loadAnnoAgreement() {
+  const box = document.getElementById('anno-agree');
+  if (!box) return;
+  try {
+    const d = await api('/api/anno/agreement');
+    if (!d.annotated) {
+      box.innerHTML = '<p class="hint">还没有人工标注过任何帖，'
+        + '标几条之后这里会显示「规则标签被人工推翻了多少」。</p>';
+      return;
+    }
+    const dimCn = { relation: '关系', process: '过程', impact: '影响' };
+    const dims = Object.keys(d.dims || {}).map(k => {
+      const st = d.dims[k];
+      const tot = st.same + st.partial + st.diff;
+      const pct = tot ? Math.round(100 * st.same / tot) : 0;
+      return '<tr><td>' + esc(dimCn[k] || k) + '</td>'
+        + '<td class="num">' + num(tot) + '</td>'
+        + '<td class="num">' + num(st.same) + '</td>'
+        + '<td class="num">' + num(st.partial) + '</td>'
+        + '<td class="num">' + num(st.diff) + '</td>'
+        + '<td class="num">' + pct + '%</td></tr>';
+    }).join('');
+    const changed = (d.changed_tags || []).slice(0, 30).map(c =>
+      '<tr><td class="num">' + esc(c.tid) + '</td>'
+      + '<td>' + esc(dimCn[c.dim] || c.dim) + '</td>'
+      + '<td class="sub2">' + esc(c.human) + '</td>'
+      + '<td class="sub2">' + esc(c.rule || '（规则没判）') + '</td></tr>').join('');
+    box.innerHTML =
+      '<div class="row"><span class="lbl">已人工标注</span><b>' + num(d.annotated)
+      + '</b> 条 ｜ <span class="lbl">整帖一致</span><b>' + num(d.thread_same)
+      + '</b> 条（' + esc(d.thread_pct) + '%）｜ <span class="lbl">有出入</span><b>'
+      + num(d.thread_diff) + '</b> 条</div>'
+      + '<div class="tablewrap"><table><thead><tr><th>维度</th><th>已标维度数</th>'
+      + '<th>一致</th><th>部分重合</th><th>不一致</th><th>一致率</th></tr></thead><tbody>'
+      + (dims || '<tr><td colspan="6" class="hint">—</td></tr>') + '</tbody></table></div>'
+      + '<p class="hint">下面是人工改了规则标签的地方（共 ' + num(d.changed_total)
+      + ' 处，显示前 30 条）—— 这是「规则标签哪一块容易判错」的直接证据。</p>'
+      + '<div class="tablewrap"><table><thead><tr><th>TID</th><th>维度</th>'
+      + '<th>人工标的</th><th>规则算的</th></tr></thead><tbody>'
+      + (changed || '<tr><td colspan="4" class="hint">人工与规则完全一致</td></tr>')
+      + '</tbody></table></div>';
   } catch (e) { /* 没登录就静默 */ }
 }
 
@@ -3614,7 +3688,47 @@ if (annoAddBtn) annoAddBtn.onclick = async () => {
 const annoRefreshBtn = document.getElementById('anno-refresh');
 if (annoRefreshBtn) annoRefreshBtn.onclick = loadAnnoQueue;
 
-/* 快捷键：1 纳入 / 2 排除 / 3 待核验 / Ctrl+Enter 提交 */
+/* ★ 批量派活：按筛选条件抽一批帖入队（2026-11-06 Label Studio 化）
+   —— 不用手打 TID，口径跟检索页一致 */
+const annoBatchBtn = document.getElementById('anno-batch');
+if (annoBatchBtn) annoBatchBtn.onclick = async () => {
+  const val = id => ((document.getElementById(id) || {}).value || '').trim();
+  const limit = parseInt(val('ab-limit') || '50', 10);
+  const body = {
+    category: val('ab-category'), state: val('ab-state'),
+    group: val('ab-group'), district: val('ab-district'),
+    date_from: val('ab-from'), date_to: val('ab-to'),
+    assignee: val('ab-assignee'), limit: limit > 0 ? limit : 50,
+  };
+  try {
+    const d = await api('/api/anno/queue/by-filter', {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    const hint = document.getElementById('anno-batch-hint');
+    if (hint) hint.textContent = '已入队 ' + d.queued + ' 条（任务 ' + d.task_code + '）'
+      + (d.skipped ? '，跳过 ' + d.skipped + ' 条（没采到正文）' : '')
+      + (d.matched > d.queued ? '，该条件共匹配 ' + d.matched + ' 条' : '');
+    toast('已入队 ' + d.queued + ' 条（任务 ' + d.task_code + '）');
+    loadAnnoQueue();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------------- 快捷键流（Label Studio 式）
+   1 纳入 / 2 排除 / 3 待核验 · Ctrl+Enter 提交并下一条
+   J 下一条 / K 上一条（**不提交**，只翻看）· Esc 清空理由框
+   ★ J/K 与提交后的「自动下一条」是两条路：
+     提交 = 存 + 跳下一条；J/K = 只翻看，方便回头核对上一条。 */
+function annoStep(delta) {
+  const q = (annoState.queue || []).filter(x => x.state !== 'done');
+  if (!q.length) { toast('队列里没有待标的了', true); return; }
+  const cur = q.findIndex(x => String(x.tid) === String(annoState.tid));
+  let i = cur + delta;
+  if (i < 0) i = 0;
+  if (i >= q.length) i = q.length - 1;
+  if (cur === i) { toast(delta > 0 ? '已经是最后一条了' : '已经是第一条了'); return; }
+  openAnno(q[i].tid);
+}
+
 document.addEventListener('keydown', (ev) => {
   const panel = document.getElementById('sub-anno');
   if (!panel || panel.classList.contains('hidden')) return;
@@ -3622,12 +3736,27 @@ document.addEventListener('keydown', (ev) => {
   if (ev.ctrlKey && ev.key === 'Enter') {
     ev.preventDefault(); submitAnno(); return;
   }
-  if (tag === 'input' || tag === 'textarea') return;
+  if (tag === 'input' || tag === 'textarea') {
+    // ★ Esc 在理由框里 = 清空理由（不是关页面）
+    if (ev.key === 'Escape' && tag === 'textarea') {
+      ev.preventDefault();
+      ev.target.value = '';
+    }
+    return;
+  }
   if (ev.key === '1' || ev.key === '2' || ev.key === '3') {
     const v = ['纳入', '排除', '待核验'][Number(ev.key) - 1];
     annoState.verdict = v;
     $$('#anno-body .verdict-btn').forEach(x =>
       x.classList.toggle('on', x.dataset.v === v));
+    return;
+  }
+  // J / K：只翻看，不提交
+  if (ev.key === 'j' || ev.key === 'J') { ev.preventDefault(); annoStep(1); return; }
+  if (ev.key === 'k' || ev.key === 'K') { ev.preventDefault(); annoStep(-1); return; }
+  if (ev.key === 'Escape') {
+    const box = document.getElementById('anno-reason');
+    if (box) box.value = '';
   }
 });
 

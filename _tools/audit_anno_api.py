@@ -75,6 +75,11 @@ def main() -> int:
     check(call("/api/anno/queue").get("_http") == 401, "队列：未登录 401")
     check(call("/api/anno/vocab").get("_http") == 401, "候选标签：未登录 401")
     check(call("/api/anno/stats").get("_http") == 401, "统计：未登录 401")
+    check(call("/api/anno/batches").get("_http") == 401, "任务批次：未登录 401")
+    check(call("/api/anno/agreement").get("_http") == 401, "一致性：未登录 401")
+    check(call("/api/anno/queue/by-filter", "POST",
+                     {"limit": 1, "assignee": "x"}).get("_http") == 401,
+          "批量派活：未登录 401")
 
     # ---- ② 管理员只读 ----
     print("\n--- ② 管理员只读 ---")
@@ -88,6 +93,12 @@ def main() -> int:
     check("review" in d and "queue" in d, "统计含队列与核验两块")
     d = call("/api/anno/pending", tok=atok)
     check(isinstance(d.get("items"), list), "待复核列表返回数组")
+    d = call("/api/anno/batches", tok=atok)
+    check(isinstance(d.get("items"), list),
+          f"任务批次返回数组（{len(d.get('items') or [])} 个批次）")
+    d = call("/api/anno/agreement", tok=atok)
+    check("annotated" in d and "thread_pct" in d,
+          f"一致性返回统计：{d.get('annotated')} 条已标注")
 
     # ---- ③ 成员 ----
     print("\n--- ③ 成员 ---")
@@ -100,6 +111,13 @@ def main() -> int:
         check(d.get("_http") == 403, f"成员复核被拒（实得 {d.get('_http')}）")
         d = call("/api/anno/queue", "POST", {"tids": [999999999]}, tok=mtok)
         check(d.get("_http") == 400, f"入队不存在的帖 → 400（实得 {d.get('_http')}）")
+        # ★ 只测「派给别人」这条路 —— 它在写库**之前**就 403 了。
+        #   不测「不传 assignee」那条：那是「派给自己」，会真的写库，
+        #   违反本脚本「不往真库写任何数据」的纪律（闸已经抓到过一次）。
+        d = call("/api/anno/queue/by-filter", "POST",
+                 {"limit": 1, "assignee": "someone-else"}, tok=mtok)
+        check(d.get("_http") == 403,
+              f"★ 成员批量派给别人 → 403（实得 {d.get('_http')}）")
     else:
         print("  （库里没有成员账号，跳过成员检查）")
 

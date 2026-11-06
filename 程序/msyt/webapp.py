@@ -1673,6 +1673,60 @@ def api_anno_review(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     return r
 
 
+@app.post("/api/anno/queue/by-filter")
+def api_anno_enqueue_by_filter(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """按**筛选条件**批量派活（管理员）：同一套检索口径，不用手打 TID。
+
+    ★ 派给别人 = 管理员的活；成员只能派给自己（跟入队同一道口径）。
+    ★ 筛选口径复用 db.search()：部门/分组/区县市/类别/受理状态/邮箱/时效灯/
+      日期区间/三维标签 —— 与检索页完全一致，不另造一套。
+    """
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    me = m.get("node_id") or m.get("email") or ""
+    who = str(req.get("assignee") or "").strip() or me
+    if who != me:
+        require_admin(request)
+    # 只认白名单里的筛选键：别把任意参数塞进 db.search()
+    allowed = ("q", "dept", "group", "district", "category", "state",
+               "mailbox", "light", "date_from", "date_to", "tag")
+    filters = {k: str(req.get(k) or "") for k in allowed if req.get(k)}
+    try:
+        r = svc.enqueue_filter(who, str(req.get("task_code") or ""),
+                                int(req.get("limit") or 50), **filters)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    HUB.info(me, f"标注队列 +{r['queued']} 条（任务 {r['task_code']}）", task=r["task_code"])
+    return r
+
+
+@app.get("/api/anno/batches")
+def api_anno_batches(request: Request, assignee: str = Query("", max_length=100)
+                     ) -> Dict[str, Any]:
+    """标注任务批次视图（L1 / L2…）：每批派给谁、标了多少。
+
+    ★ 默认看**自己**的批次；看别人的 = 管理员的事（跟队列同一道口径）。
+    """
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    me = m.get("node_id") or m.get("email") or ""
+    who = (assignee or "").strip() or me
+    if who != me:
+        require_admin(request)
+    return {"items": svc.batches(who), "assignee": who, "me": me}
+
+
+@app.get("/api/anno/agreement")
+def api_anno_agreement(request: Request) -> Dict[str, Any]:
+    """人工标签 vs 规则标签 的吻合情况（机器判得准不准）。
+
+    ★ 口径说明见 AnnoService.agreement() 的 docstring。
+    """
+    _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    return svc.agreement()
+
+
 @app.get("/api/anno/stats")
 def api_anno_stats(request: Request) -> Dict[str, Any]:
     """标注进度：队列、标注状态、核验结论三块。"""

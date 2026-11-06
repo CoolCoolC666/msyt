@@ -254,6 +254,164 @@ class AnnoService:
             "ORDER BY a.annotated_at DESC, a.tid LIMIT ?",
             (max(1, int(limit)),)).fetchall()]
 
+    # ---------------------------------------------------------------- 批量派活
+    def enqueue_filter(self, assignee: str = "", task_code: str = "",
+                        limit: int = 50, **filters: Any) -> Dict[str, Any]:
+        """按**筛选条件**批量入队（替代手打一串 TID）。
+
+        ★ 复用 db.search() 的筛选能力（同一套口径，不另写一套 SQL）：
+          管理员在检索页看到「这些帖该标」，直接按同样的条件批量派给某人。
+
+        ★ 只收**已采到正文**的帖 —— 与 enqueue() 同口径，
+          没正文的标不了，标空帖只是浪费标注员时间。
+        """
+        limit = max(1, min(int(limit or 50), 500))
+        res = self.db.search(limit=limit, scope="thread", **filters)
+        want = [int(it["tid"]) for it in (res.get("items") or [])]
+        ok = []
+        for t in want:
+            r = self.db.conn.execute(
+                "SELECT detail_state FROM threads WHERE tid=?", (t,)).fetchone()
+            if r and (r["detail_state"] or "") == "done":
+                ok.append(t)
+        if not ok:
+            raise ValueError("这个条件下没有「已采到正文」的帖，标不了")
+        code = (task_code or "").strip() or self.next_code()
+        now = _now()
+        with self.db.lock:
+            self.db.conn.executemany(
+                "INSERT INTO anno_queue(tid,assignee,state,task_code,added_at) "
+                "VALUES(?,?,'queued',?,?) "
+                "ON CONFLICT(tid) DO UPDATE SET assignee=excluded.assignee, "
+                "state='queued', task_code=excluded.task_code, done_at=''",
+                [(t, assignee or "", code, now) for t in ok])
+            self.db.conn.commit()
+        return {"task_code": code, "queued": len(ok),
+                "skipped": len(want) - len(ok),
+                "matched": int(res.get("total") or 0)}
+
+    # ---------------------------------------------------------------- 任务批次
+    def batches(self, assignee: str = "") -> List[Dict[str, Any]]:
+        """标注任务批次视图：按 task_code 分组看进度。
+
+        ★ Label Studio 的做法：一个「项目」下有多个任务，每个任务派给某人，
+          任务之间互不干扰。本项目的对应物就是 task_code（L1 / L2…）。
+
+        ★ 为什么按**批次**而不是按帖看：组员做完一批要知道「这批还剩几条」，
+          管理员要知道「每个任务派给了谁、完成了多少」——
+          只列帖子列表看不出这个。
+        """
+        sql = ("SELECT task_code, assignee, state, COUNT(*) n "
+               "FROM anno_queue")
+        args: List[Any] = []
+        if assignee:
+            sql += " WHERE assignee=?"
+            args.append(assignee)
+        sql += " GROUP BY task_code, assignee, state"
+        rows = self.db.conn.execute(sql, args).fetchall()
+        agg: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            code = str(r["task_code"] or "")
+            b = agg.setdefault(code, {
+                "task_code": code, "total": 0, "done": 0, "queued": 0,
+                "assignees": {},
+            })
+            n = int(r["n"])
+            b["total"] += n
+            if str(r["state"]) == "done":
+                b["done"] += n
+            else:
+                b["queued"] += n
+            who = str(r["assignee"] or "")
+            if who:
+                b["assignees"][who] = b["assignees"].get(who, 0) + n
+        out = list(agg.values())
+        for b in out:
+            b["assignee"] = "、".join(
+                "%s(%d)" % (k, v) for k, v in sorted(b["assignees"].items()))
+            b.pop("assignees", None)
+            b["pct"] = (int(round(100.0 * b["done"] / b["total"]))
+                        if b["total"] else 0)
+        out.sort(key=lambda x: x["task_code"])
+        return out
+
+    # ---------------------------------------------------------------- 一致性
+    def agreement(self) -> Dict[str, Any]:
+        """人工标签 vs 规则标签 的吻合情况（**不引入独立标注系统**）。
+
+        ★ 对标对象是**规则标签**（机器算的），不是另一个标注员 ——
+          本系统一条帖只存一份有效人工值（P2-4 口径），
+          所以「人跟人比」在当前模型下没有数据基础。
+          「机器 vs 人」反而更贴本项目的论点：
+          规则标签到底准不准？人工改了多少？
+
+        ★ 口径：
+          · 只看**有人工标注**的帖（否则分母会被全库稀释，没意义）
+          · 每个维度分别比：人工选的标签集合 vs 规则算的标签集合
+            → 完全一致 / 部分重合 / 不一致
+          · 帖级：三个维度**全都一致**才算「整帖一致」
+          · 被打回的人工标签（status='rejected'）**不计入**——
+            它已经失效、导出回落到规则值，拿它比就是自己跟自己比
+        """
+        # 有效人工标签（已生效的：submitted / approved）
+        human: Dict[int, Dict[str, set]] = {}
+        for tid, dim, tag in self.db.conn.execute(
+                "SELECT tid, dim, tag FROM thread_anno_tags WHERE status<>'rejected'"):
+            human.setdefault(int(tid), {}).setdefault(str(dim), set()).add(str(tag))
+        if not human:
+            return {"annotated": 0, "thread_same": 0, "thread_diff": 0,
+                    "thread_pct": 0, "dims": {}, "changed_tags": []}
+        # 规则标签（只查这些帖，别拉全库两百万条）
+        tids = list(human.keys())
+        rule: Dict[int, Dict[str, set]] = {}
+        CH = 900  # SQLite 参数上限，批查
+        for i in range(0, len(tids), CH):
+            chunk = tids[i:i + CH]
+            qm = ",".join("?" * len(chunk))
+            for tid, dim, tag in self.db.conn.execute(
+                    "SELECT tid, dim, tag FROM thread_dim_tags WHERE tid IN ("
+                    + qm + ")", chunk):
+                rule.setdefault(int(tid), {}).setdefault(str(dim), set()).add(str(tag))
+        dim_stat: Dict[str, Dict[str, int]] = {}
+        thread_same = 0
+        thread_diff = 0
+        changed: List[Dict[str, Any]] = []
+        for tid, hmap in human.items():
+            rmap = rule.get(tid, {})
+            dims = set(hmap) | set(rmap)
+            same_all = True
+            for dim in dims:
+                h = hmap.get(dim, set())
+                r = rmap.get(dim, set())
+                st = dim_stat.setdefault(dim, {"same": 0, "partial": 0, "diff": 0})
+                if h == r:
+                    st["same"] += 1
+                elif h & r:
+                    st["partial"] += 1
+                    same_all = False
+                else:
+                    st["diff"] += 1
+                    same_all = False
+                if h and h != r:
+                    changed.append({"tid": tid, "dim": dim,
+                                    "human": " / ".join(sorted(h)),
+                                    "rule": " / ".join(sorted(r))})
+            if same_all:
+                thread_same += 1
+            else:
+                thread_diff += 1
+        n = len(human)
+        return {
+            "annotated": n,
+            "thread_same": thread_same,
+            "thread_diff": thread_diff,
+            "thread_pct": int(round(100.0 * thread_same / n)) if n else 0,
+            "dims": dim_stat,
+            # ★ 只回**前若干条**差异明细：全量可能上万条，前端表格塞不下
+            "changed_tags": sorted(changed, key=lambda x: x["tid"])[:200],
+            "changed_total": len(changed),
+        }
+
     def vocab(self) -> Dict[str, Any]:
         """候选标签清单：各维度**已经出现过的取值**。
 

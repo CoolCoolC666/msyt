@@ -501,7 +501,8 @@
         <p class="hint">
           组员在网页上标，管理员复核。<b>人工标签优先覆盖规则标签</b>，规则原值在导出里另留一列
           （「规则三维标签」），人工值怎么来的可复核。<br>
-          快捷键：<b>1</b> 纳入　<b>2</b> 排除　<b>3</b> 待核验　<b>Ctrl+Enter</b> 提交并下一条
+          快捷键：<b>1</b> 纳入　<b>2</b> 排除　<b>3</b> 待核验　<b>Ctrl+Enter</b> 提交并下一条<br>
+          <b>J</b> 下一条　<b>K</b> 上一条（只翻看，不提交）　<b>Esc</b> 清空理由框
         </p>
         <div class="row">
           <input id="anno-tid" placeholder="按 TID 加入队列（如 8074300）" style="max-width:280px">
@@ -523,6 +524,48 @@
         <p class="hint">组员标完在这里复核：<b>通过</b>＝确认；<b>打回</b>＝人工标签失效、
           导出回落到规则标签（记录仍留着，不删）。打回必须写意见。</p>
         <div class="tablewrap"><table id="t-anno-pending"></table></div>
+      </div>
+
+      <!-- ★ 任务批次（2026-11-06 Label Studio 化）：一个批次 = 一个标注任务 -->
+      <div class="card" id="anno-batches-card">
+        <h3>标注任务批次</h3>
+        <p class="hint">
+          每个批次就是一个标注任务（<b>L1 / L2…</b>），派给谁、标完多少一目了然。
+          管理员看全部，成员只看自己的批次。
+        </p>
+        <div class="tablewrap"><table id="t-anno-batches"></table></div>
+      </div>
+
+      <!-- ★ 批量派活（2026-11-06）：按筛选条件抽一批帖入队，不用手打 TID -->
+      <div class="card" id="anno-batch-card">
+        <h3>批量派活</h3>
+        <p class="hint">
+          按<b>筛选条件</b>抽一批已采到正文的帖进标注队列（口径跟检索页一致）。
+          留空 = 该维度不限；数量上限 500。
+        </p>
+        <div class="row">
+          <select id="ab-category" data-dict="categories"></select>
+          <select id="ab-state" data-dict="states"></select>
+          <select id="ab-group"></select>
+          <select id="ab-district"></select>
+          <input id="ab-from" type="date" title="起始日期">
+          <input id="ab-to" type="date" title="截止日期">
+          <input id="ab-limit" type="number" value="50" min="1" max="500"
+                 style="max-width:90px" title="本次最多派多少条">
+          <input id="ab-assignee" placeholder="派给（可空=自己）" style="max-width:220px">
+          <button class="primary" id="anno-batch">批量入队</button>
+        </div>
+        <span class="hint" id="anno-batch-hint"></span>
+      </div>
+
+      <!-- ★ 一致性反馈（2026-11-06）：人工标签 vs 规则标签 -->
+      <div class="card" id="anno-agree-card">
+        <h3>人工 vs 规则：标签吻合情况</h3>
+        <p class="hint">
+          规则标签是<b>机器算的</b>，这里是拿人工标注去检验它准不准。
+          只统计<b>已经人工标过</b>的帖；被打回的人工标签不算（已失效、导出回落到规则值）。
+        </p>
+        <div id="anno-agree"></div>
       </div>
     </div>
 
