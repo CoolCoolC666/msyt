@@ -494,6 +494,70 @@
       <div class="tablewrap"><table id="t-assist"></table></div>
     </div>
 
+
+    <div class="card" id="online-card">
+      <h3>在线节点（谁在采、有没有卡住）</h3>
+      <p class="hint">「在线」= 5 分钟内有心跳。进行中 &gt; 0 且心跳停在几分钟前 →
+        多半是那个成员的 agent 卡住了，先让他停掉重开。</p>
+      <div class="tablewrap"><table id="t-online"></table></div>
+    </div>
+
+
+    <div class="card" id="members-card">
+      <h3>成员名单</h3>
+      <p class="hint">只有名单里的邮箱能登录。添加成员后，把初始密码告诉对方即可；
+        对方登录后可在右上角<b>自行改密码</b>。</p>
+      <div class="row">
+        <input id="mb-email" placeholder="成员邮箱">
+        <input id="mb-pw" placeholder="初始密码（留空自动生成）">
+        <input id="mb-note" placeholder="备注（组名/负责部门）">
+        <button class="primary" id="btn-mb-add">添加成员</button>
+      </div>
+      <div class="tablewrap"><table id="t-members"></table></div>
+    </div>
+
+    <div class="card">
+      <h3>实时日志（管理员与成员看的是同一条流）</h3>
+      <p class="hint">节点徽标区分是谁在采；<b>任务编号</b>（如 A1）用于对齐双方记录。</p>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="st-all"> 显示全部节点</label>
+        <button class="ghost" id="btn-st-clear">清屏</button>
+        <span class="dim" id="st-status"></span>
+      </div>
+      <div class="logbox" id="stream-log"><p class="hint">等待日志…</p></div>
+    </div>
+    <div class="card" id="conflicts-card">
+      <h3>合并记录（覆盖 / 新增的痕迹）</h3>
+      <p class="hint">成员回传时，每一次<b>覆盖</b>（同楼层用成员版替换本地版）与
+        <b>新增</b>（站方追加的回复 = 增量）都留一行：谁回的、本地原来是什么、
+        成员传了什么。<b>可查、可追责</b>。</p>
+      <div class="row">
+        <button class="ghost" id="btn-conflicts-refresh">刷新</button>
+        <span class="dim" id="cf-count"></span>
+      </div>
+      <!-- ★ 裁决区（优化报告 P1-3）：按类型批量裁决 + 可撤销 -->
+      <div class="row" id="cf-adjudicate">
+        <input id="cf-note" autocomplete="off" style="flex:1 1 420px"
+          placeholder="裁决说明（必填）：按哪条规则、为什么这样处理">
+        <span id="cf-kinds" class="dim"></span>
+      </div>
+      <p class="hint">裁决只是给这批合并痕迹<b>补一个结论</b>（已按规则处理 / 为什么），
+        <b>不删任何数据</b>，也<b>不改</b>「核验台账」里的人工结论 —— 那是另一回事。</p>
+      <div class="tablewrap"><table id="t-conflicts"></table></div>
+      <!-- ★ 翻页 + 折叠条（2026-10-23 加）
+           合并记录会越积越多，一次铺开能顶掉好几屏；
+           给一条「翻页 + 收起/展开」的条，把长表压住。 -->
+      <div class="row" id="cf-bar" style="margin-top:10px">
+        <button class="ghost tiny" id="cf-prev">上一页</button>
+        <span class="dim" id="cf-page">第 1 / 1 页</span>
+        <button class="ghost tiny" id="cf-next">下一页</button>
+        <span class="sep"></span>
+        <button class="ghost tiny" id="cf-toggle">收起</button>
+      </div>
+    </div>
+
+  </div>
+
     <!-- ---------- 子页：标注台 ---------- -->
     <div class="subpanel hidden" id="sub-anno">
       <div class="card">
@@ -576,70 +640,6 @@
         <div id="anno-agree"></div>
       </div>
     </div>
-
-    <div class="card" id="online-card">
-      <h3>在线节点（谁在采、有没有卡住）</h3>
-      <p class="hint">「在线」= 5 分钟内有心跳。进行中 &gt; 0 且心跳停在几分钟前 →
-        多半是那个成员的 agent 卡住了，先让他停掉重开。</p>
-      <div class="tablewrap"><table id="t-online"></table></div>
-    </div>
-
-
-    <div class="card" id="members-card">
-      <h3>成员名单</h3>
-      <p class="hint">只有名单里的邮箱能登录。添加成员后，把初始密码告诉对方即可；
-        对方登录后可在右上角<b>自行改密码</b>。</p>
-      <div class="row">
-        <input id="mb-email" placeholder="成员邮箱">
-        <input id="mb-pw" placeholder="初始密码（留空自动生成）">
-        <input id="mb-note" placeholder="备注（组名/负责部门）">
-        <button class="primary" id="btn-mb-add">添加成员</button>
-      </div>
-      <div class="tablewrap"><table id="t-members"></table></div>
-    </div>
-
-    <div class="card">
-      <h3>实时日志（管理员与成员看的是同一条流）</h3>
-      <p class="hint">节点徽标区分是谁在采；<b>任务编号</b>（如 A1）用于对齐双方记录。</p>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="st-all"> 显示全部节点</label>
-        <button class="ghost" id="btn-st-clear">清屏</button>
-        <span class="dim" id="st-status"></span>
-      </div>
-      <div class="logbox" id="stream-log"><p class="hint">等待日志…</p></div>
-    </div>
-    <div class="card" id="conflicts-card">
-      <h3>合并记录（覆盖 / 新增的痕迹）</h3>
-      <p class="hint">成员回传时，每一次<b>覆盖</b>（同楼层用成员版替换本地版）与
-        <b>新增</b>（站方追加的回复 = 增量）都留一行：谁回的、本地原来是什么、
-        成员传了什么。<b>可查、可追责</b>。</p>
-      <div class="row">
-        <button class="ghost" id="btn-conflicts-refresh">刷新</button>
-        <span class="dim" id="cf-count"></span>
-      </div>
-      <!-- ★ 裁决区（优化报告 P1-3）：按类型批量裁决 + 可撤销 -->
-      <div class="row" id="cf-adjudicate">
-        <input id="cf-note" autocomplete="off" style="flex:1 1 420px"
-          placeholder="裁决说明（必填）：按哪条规则、为什么这样处理">
-        <span id="cf-kinds" class="dim"></span>
-      </div>
-      <p class="hint">裁决只是给这批合并痕迹<b>补一个结论</b>（已按规则处理 / 为什么），
-        <b>不删任何数据</b>，也<b>不改</b>「核验台账」里的人工结论 —— 那是另一回事。</p>
-      <div class="tablewrap"><table id="t-conflicts"></table></div>
-      <!-- ★ 翻页 + 折叠条（2026-10-23 加）
-           合并记录会越积越多，一次铺开能顶掉好几屏；
-           给一条「翻页 + 收起/展开」的条，把长表压住。 -->
-      <div class="row" id="cf-bar" style="margin-top:10px">
-        <button class="ghost tiny" id="cf-prev">上一页</button>
-        <span class="dim" id="cf-page">第 1 / 1 页</span>
-        <button class="ghost tiny" id="cf-next">下一页</button>
-        <span class="sep"></span>
-        <button class="ghost tiny" id="cf-toggle">收起</button>
-      </div>
-    </div>
-
-  </div>
-
   <!-- ---------- 子页：我的账号 ---------- -->
   <div class="subpanel hidden" id="sub-me">
     <div class="grid2">
