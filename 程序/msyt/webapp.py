@@ -56,6 +56,7 @@ from .anno import AnnoService
 from .assist import AssistService
 from .auth import (email_allowed, hash_pw, make_token, new_secret, read_token,
                    verify_pw)
+from . import ai
 from . import bundle
 from . import topic
 from .config import Config
@@ -1689,13 +1690,193 @@ def api_anno_claim(request: Request, req: dict = Body(default={})) -> Dict[str, 
         limit = int(req.get("limit") or 20)
     except (TypeError, ValueError):
         limit = 20
+    # ★ 领活也能**按筛选条件**领（与检索页同一套口径，用户 2026-11-08 提）：
+    #   只认白名单里的筛选键：别把任意参数塞进 db.search()
+    allowed = ("q", "dept", "group", "district", "category", "state",
+               "mailbox", "light", "date_from", "date_to", "tag")
+    filters = {k: str(req.get(k) or "") for k in allowed if req.get(k)}
     try:
-        r = svc.claim(me, limit)
+        r = svc.claim(me, limit, **filters)
     except ValueError as e:
         raise HTTPException(400, str(e))
     HUB.info(me, f"领活 {r.get('claimed', 0)} 条（任务 {r.get('task_code')}）",
              task=r.get("task_code") or "")
     return r
+
+
+@app.get("/api/anno/ai/{tid}")
+def api_anno_ai_get(request: Request, tid: int) -> Dict[str, Any]:
+    """取一条帖的 AI 初注建议（检索页点进来的详情也用它显示）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    svc = ai.AIService(db, AnnoService(db, HUB))
+    return svc.get(int(tid))
+
+
+# ---------------------------------------------------------------- AI 初注（AI 初筛）
+# ★ 优化报告 P2-5（2026-11-08 用户提）：
+#   AI 只给**建议**，作数的是人工标注 → 所有采纳都走正常提交路径（anno.submit）。
+#   密钥只存服务器本地文件（程序/data/ai_config.json）：不进库、不进发布包、不回显。
+
+
+@app.get("/api/ai/config")
+def api_ai_config(request: Request) -> Dict[str, Any]:
+    """AI 设置。★ **只回非敏感字段**，密钥不回显。"""
+    require_admin(request)
+    return ai.public_config()
+
+
+@app.post("/api/ai/config")
+def api_ai_config_save(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """保存 AI 设置（管理员）。★ api_key 传空 = 不改。"""
+    require_admin(request)
+    try:
+        return ai.save_config(req)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/anno/ai/suggest")
+def api_anno_ai_suggest(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """对**一条**帖生成 AI 初注建议。
+
+    ★ req["ai"] = 成员**自己的**配置（存他浏览器里）—— 只在这次请求里用，
+      不落盘、不入库、不写日志；没有就用服务器上管理员配的默认。
+    """
+    _require_member(request)
+    db = get_db(_cfg())
+    svc = ai.AIService(db, AnnoService(db, HUB), req.get("ai") or {})
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 不合法")
+    if not tid:
+        raise HTTPException(400, "缺 tid")
+    try:
+        return svc.suggest(tid)
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/anno/ai/batch")
+def api_anno_ai_batch(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**批量** AI 初注 —— 走**后台任务**，前端轮询看逐条进度。
+
+    ★ 为什么改成后台（2026-11-08 用户反馈「这个进程不显示，比较尴尬」）：
+      一条就是一次模型调用，20 条可能要好几分钟；同步跑 → 请求一直挂着，
+      页面看着像死了。改成后台任务后：立刻返回任务号 → 前端逐条看进度，
+      期间页面其它功能照常用（复用采集任务那套 job 机制）。
+    ★ 遇致命错误（鉴权/额度/网络）立刻停手，不继续烧钱。
+    ★ 成员的**个人 key** 只在下面的闭包里用：既不落盘，也不进 job.params
+      （/api/jobs 会把 params 摊开给人看，密钥不能进去）。
+    """
+    m = _require_member(request)
+    tids = []
+    for x in (req.get("tids") or []):
+        try:
+            tids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not tids:
+        raise HTTPException(400, "没给 tids")
+    limit = max(1, min(int(req.get("limit") or 20), 50))
+    tids = tids[:limit]
+    cfg_override = req.get("ai") or {}
+    node = str(m.get("node_id") or "")
+    job = JOBS.create("ai_batch", {"tids": tids, "limit": limit}, node=node)
+
+    def _run(j: Job) -> Dict[str, Any]:
+        db = get_db(_cfg())
+        svc = ai.AIService(db, AnnoService(db, HUB), cfg_override)
+        ok = failed = 0
+        stopped = ""
+        total = len(tids)
+        for i, tid in enumerate(tids, 1):
+            if j.should_stop():
+                stopped = "已停止"
+                j.log("已请求停止，剩下的没跑")
+                break
+            j.log("进度：%d/%d · tid=%d 开始" % (i, total, tid))
+            try:
+                r = svc.suggest(tid)
+            except ai.AIError as e:
+                failed += 1
+                j.log("✗ tid=%d %s" % (tid, str(e)[:160]))
+                HUB.info(node, "AI 初注失败 tid=%d：%s" % (tid, str(e)[:120]), task="ai")
+                if e.fatal:
+                    stopped = str(e)[:160]
+                    j.log("致命错误 → 停手（不再继续烧额度）")
+                    break
+                continue
+            ok += 1
+            j.log("✓ tid=%d 结论=%s%s" % (
+                tid, r.get("verdict") or "—",
+                "（有疑点，要人工确认）" if r.get("needs_review") else ""))
+            HUB.info(node, "AI 初注 tid=%d 结论=%s" % (tid, r.get("verdict") or "—"),
+                     task="ai")
+            time.sleep(0.3)          # 别把人家模型接口打爆
+        j.log("进度：%d/%d 完成（成功 %d，失败 %d）" % (total, total, ok, failed))
+        return {"ok": ok, "failed": failed, "stopped": stopped, "total": total}
+
+    JOBS.spawn(job, _run)
+    return {"job": job.to_dict(tail=0)}
+
+
+@app.post("/api/anno/ai/adopt")
+def api_anno_ai_adopt(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """采纳**一条** AI 建议为人工标注（前端会先弹二次确认）。"""
+    m = _require_member(request)
+    db = get_db(_cfg())
+    svc = ai.AIService(db, AnnoService(db, HUB))
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 不合法")
+    if not tid:
+        raise HTTPException(400, "缺 tid")
+    try:
+        return svc.adopt(tid, m.get("node_id") or m.get("email") or "")
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/anno/ai/adopt-batch")
+def api_anno_ai_adopt_batch(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**批量采纳** AI 建议。★ 有疑点的**一律跳过**（要人工确认）。"""
+    m = _require_member(request)
+    db = get_db(_cfg())
+    svc = ai.AIService(db, AnnoService(db, HUB))
+    tids = []
+    for x in (req.get("tids") or []):
+        try:
+            tids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not tids:
+        raise HTTPException(400, "没给 tids")
+    return svc.adopt_batch(tids, m.get("node_id") or m.get("email") or "")
+
+
+@app.post("/api/anno/review/batch")
+def api_anno_review_batch(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**批量通过 / 批量打回**待复核的人工标注（管理员）。"""
+    require_admin(request)
+    db = get_db(_cfg())
+    svc = AnnoService(db, HUB)
+    tids = []
+    for x in (req.get("tids") or []):
+        try:
+            tids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not tids:
+        raise HTTPException(400, "没给 tids")
+    approved = bool(req.get("approved", True))
+    note = str(req.get("note") or "")
+    try:
+        return svc.review_batch(tids, approved, note, "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/anno/queue/by-filter")

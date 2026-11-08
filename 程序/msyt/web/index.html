@@ -578,6 +578,21 @@
           <button id="anno-refresh">刷新队列</button>
           <span class="hint" id="anno-stats"></span>
         </div>
+        <div class="row">
+          <span class="lbl">领活范围</span>
+          <select id="cl-category" title="类别（与检索页同一套口径）"></select>
+          <select id="cl-state" title="受理状态"></select>
+          <select id="cl-group" title="部门分组"></select>
+          <select id="cl-district" title="区县市"></select>
+          <span class="hint">留空 = 不限。筛选口径与检索页一致。</span>
+        </div>
+        <div class="row">
+          <button id="anno-ai-batch">批量 AI 初注（当前队列未标的，最多 20 条）</button>
+          <button id="anno-ai-adopt-all">批量采纳 AI 建议</button>
+          <button class="hidden" id="anno-ai-stop">停止这一轮</button>
+          <span class="hint" id="anno-ai-state"></span>
+        </div>
+        <div class="logbox" id="anno-ai-log"><p class="hint">AI 初注的逐条进度（还没开始跑）</p></div>
         <p class="hint">
           ★ <b>「领一批活」就是干活的入口</b>：从候选池（已采到正文、还没人标过、
           也不在任何人队列里的帖）领一批到自己名下，不用等管理员派。
@@ -595,6 +610,11 @@
         <h3>待复核（管理员）</h3>
         <p class="hint">组员标完在这里复核：<b>通过</b>＝确认；<b>打回</b>＝人工标签失效、
           导出回落到规则标签（记录仍留着，不删）。打回必须写意见。</p>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="anno-pick-all"> 全选</label>
+          <button class="tiny" id="anno-review-all">批量通过（选中的）</button>
+          <span class="hint" id="anno-review-state"></span>
+        </div>
         <div class="tablewrap"><table id="t-anno-pending"></table></div>
       </div>
 
@@ -667,6 +687,51 @@
         <p class="hint" id="pw-state"></p>
       </div>
     </div>
+
+      <div class="card" id="ai-local-card">
+        <h3>我的 API（存在这台电脑的浏览器里）</h3>
+        <p class="hint">
+          ★ <b>组员与管理员都能用</b>：AI 初注要能在你这边生效，就用你自己的一份。
+          这份只存在<b>你这台电脑的浏览器</b>里（localStorage）——
+          <b>不发给服务器保存</b>、不进数据库、只在你发 AI 请求时带过去用一次。
+          不填这一栏 = 用服务器上管理员配的默认（费用走管理员）。
+          <br>⚠ 公用电脑上别填（同一浏览器的人能读到）。
+        </p>
+        <div class="row">
+          <select id="ai-l-protocol">
+            <option value="openai">OpenAI 兼容（/chat/completions）</option>
+            <option value="anthropic">Anthropic（/v1/messages）</option>
+          </select>
+          <input id="ai-l-base" placeholder="base_url，如 https://api.openai.com/v1" style="max-width:300px">
+          <input id="ai-l-model" placeholder="模型名，如 gpt-4o-mini" style="max-width:200px">
+          <input id="ai-l-key" type="password" placeholder="api_key（只存本机浏览器）" style="max-width:240px">
+          <input id="ai-l-timeout" type="number" value="60" min="5" max="300" title="超时（秒）" style="max-width:90px">
+          <button class="primary" id="ai-l-save">保存</button>
+          <button class="ghost" id="ai-l-clear">清除</button>
+        </div>
+        <p class="hint" id="ai-local-state"></p>
+      </div>
+
+      <div class="card hidden" id="ai-config-card">
+        <h3>AI 初注设置（服务器默认 · 管理员）</h3>
+        <p class="hint">
+          ★ 密钥<b>只存在这台服务器</b>（程序/data/ai_config.json）：不进数据库、不进发布包、不回显；
+          换密钥要重填。支持 <b>OpenAI 兼容协议</b>与 <b>Anthropic 协议</b>。
+        </p>
+        <div class="row">
+          <select id="ai-protocol">
+            <option value="openai">OpenAI 兼容（/chat/completions）</option>
+            <option value="anthropic">Anthropic（/v1/messages）</option>
+          </select>
+          <input id="ai-base" placeholder="base_url，如 https://api.openai.com/v1" style="max-width:300px">
+          <input id="ai-model" placeholder="模型名，如 gpt-4o-mini" style="max-width:200px">
+          <input id="ai-key" type="password" placeholder="api_key（留空 = 不改）" style="max-width:240px">
+          <input id="ai-timeout" type="number" value="60" min="5" max="300" title="超时（秒）" style="max-width:90px">
+          <label class="chk"><input type="checkbox" id="ai-enabled"> 启用</label>
+          <button class="primary" id="ai-save">保存</button>
+        </div>
+        <p class="hint" id="ai-state"></p>
+      </div>
   </div>
 </section>
 
@@ -802,5 +867,6 @@
 
 <script src="/static/int_state.js?v=__ISV__"></script>
 <script src="/static/app.js?v=__JSV__"></script>
+<script src="/static/ai.js?v=__JSV__"></script>
 </body>
 </html>

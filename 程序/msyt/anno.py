@@ -144,6 +144,8 @@ class AnnoService:
             "SELECT dim, tag, annotator, annotated_at, status FROM thread_anno_tags "
             "WHERE tid=? ORDER BY dim, tag", (int(tid),))]
         d["review"] = self.db.get_review(int(tid))
+        # ★ AI 初注建议（优化报告 P2-5）：有就在界面上一并显示（含「疑点」标记）
+        d["ai"] = self.db.get_ai_anno(int(tid))
         return d
 
     def submit(self, node: str, tid: int, verdict: str = "", reason: str = "",
@@ -255,7 +257,8 @@ class AnnoService:
             (max(1, int(limit)),)).fetchall()]
 
     # ---------------------------------------------------------------- 领活
-    def claim(self, assignee: str = "", limit: int = 20) -> Dict[str, Any]:
+    def claim(self, assignee: str = "", limit: int = 20,
+              **filters: Any) -> Dict[str, Any]:
         """**领活**：从候选池领一批帖进自己的标注队列。
 
         ★ 为什么要有这个：标注台是**自己干活的地方**，
@@ -273,22 +276,71 @@ class AnnoService:
           能看出「这批是谁的、标到哪了」。
         """
         limit = max(1, min(int(limit or 20), 200))
-        # 候选池查询：已采正文 + 不在队列 + 没人工标注
-        rows = self.db.conn.execute(
-            "SELECT t.tid FROM threads t "
-            "LEFT JOIN anno_queue q ON q.tid=t.tid "
-            "LEFT JOIN thread_anno_tags a ON a.tid=t.tid "
-            "WHERE t.detail_state='done' AND q.tid IS NULL AND a.tid IS NULL "
-            "ORDER BY t.pub_ts DESC, t.tid DESC LIMIT ?",
-            (limit,)).fetchall()
-        tids = [int(r["tid"]) for r in rows]
+        filters = {k: v for k, v in (filters or {}).items()
+                   if str(v or "").strip()}
+        if filters:
+            # ★ 带筛选条件：走 db.search() 的**同一套口径**（与检索页完全一致），
+            #   再按候选池条件过滤 —— 不另写一套 SQL，口径才不会分叉。
+            res = self.db.search(limit=min(max(limit * 3, 50), 500),
+                                 scope="thread", **filters)
+            tids: List[int] = []
+            for it in (res.get("items") or []):
+                t = int(it["tid"])
+                r = self.db.conn.execute(
+                    "SELECT t.detail_state, q.tid AS q, a.tid AS a "
+                    "FROM threads t LEFT JOIN anno_queue q ON q.tid=t.tid "
+                    "LEFT JOIN thread_anno_tags a ON a.tid=t.tid "
+                    "WHERE t.tid=?", (t,)).fetchone()
+                if (r and (r["detail_state"] or "") == "done"
+                        and not r["q"] and not r["a"]):
+                    tids.append(t)
+                if len(tids) >= limit:
+                    break
+        else:
+            # 候选池查询：已采正文 + 不在队列 + 没人工标注
+            rows = self.db.conn.execute(
+                "SELECT t.tid FROM threads t "
+                "LEFT JOIN anno_queue q ON q.tid=t.tid "
+                "LEFT JOIN thread_anno_tags a ON a.tid=t.tid "
+                "WHERE t.detail_state='done' AND q.tid IS NULL AND a.tid IS NULL "
+                "ORDER BY t.pub_ts DESC, t.tid DESC LIMIT ?",
+                (limit,)).fetchall()
+            tids = [int(r["tid"]) for r in rows]
         if not tids:
             return {"task_code": "", "claimed": 0,
-                    "hint": "候选池空了：没有「已采到正文、还没人标过、"
-                            "也不在任何人队列里」的帖"}
+                    "hint": ("这个筛选条件下没有可领的帖（要「已采到正文、还没人标过、"
+                             "也不在任何人队列里」）" if filters else
+                             "候选池空了：没有「已采到正文、还没人标过、"
+                             "也不在任何人队列里」的帖")}
         r = self.enqueue(tids, assignee)
         r["claimed"] = r["queued"]
         return r
+
+    def review_batch(self, tids: List[int], approved: bool, note: str = "",
+                     reviewer: str = "") -> Dict[str, Any]:
+        """**批量通过 / 批量打回**待复核的人工标注。
+
+        ★ 打回必须写意见（与单条 review() 同纪律：不写意见就打回 = 没留痕）。
+        ★ 单条失败不影响其它条 → 失败原因逐条返回。
+        """
+        if not approved and not (note or "").strip():
+            raise ValueError("批量打回必须写意见")
+        done: List[int] = []
+        skipped: List[Dict[str, Any]] = []
+        for tid in list(tids):
+            has = self.db.conn.execute(
+                "SELECT 1 FROM thread_anno_tags WHERE tid=? LIMIT 1",
+                (int(tid),)).fetchone()
+            if not has:
+                skipped.append({"tid": int(tid), "why": "没有待复核的标注"})
+                continue
+            try:
+                self.review(int(tid), approved, note, reviewer)
+                done.append(int(tid))
+            except Exception as e:
+                skipped.append({"tid": int(tid), "why": str(e)[:120]})
+        return {"ok": len(done), "tids": done, "skipped": skipped,
+                "skipped_n": len(skipped)}
 
     # ---------------------------------------------------------------- 批量派活
     def enqueue_filter(self, assignee: str = "", task_code: str = "",

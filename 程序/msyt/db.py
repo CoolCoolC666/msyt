@@ -451,6 +451,28 @@ CREATE TABLE IF NOT EXISTS anno_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_aq_assignee ON anno_queue(assignee, state);
 
+-- ---------------------------------------------------------------- AI 初注（AI 初筛）
+-- ★ 2026-11-08 新增（优化报告 P2-5）：AI 给的**建议**单独存一张表，
+--   **不与人工台账混**：
+--   · sample_review   = 人工复核结果（作数的那个）
+--   · thread_ai_anno  = AI 初筛结果（只是建议，采纳后才进人工台账）
+--   课件字段⑥要的是**两者并列**，所以两张表各管各的。
+-- ★ 采纳 AI 建议走 AnnoService.submit()（正常提交路径），人工标签照旧生效。
+CREATE TABLE IF NOT EXISTS thread_ai_anno (
+    tid       INTEGER PRIMARY KEY,
+    verdict   TEXT NOT NULL DEFAULT '',   -- AI 建议结论：纳入/排除/待核验
+    reason    TEXT NOT NULL DEFAULT '',   -- AI 给的理由
+    tags      TEXT NOT NULL DEFAULT '',   -- JSON: [{"dim","tag"}]
+    dropped   TEXT NOT NULL DEFAULT '',   -- JSON: 被丢弃的标签（不在候选清单里）
+    model     TEXT NOT NULL DEFAULT '',   -- 用了哪个模型（可追溯）
+    protocol  TEXT NOT NULL DEFAULT '',   -- openai / anthropic
+    prompt_version TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    status    TEXT NOT NULL DEFAULT 'suggested'   -- suggested | adopted
+);
+CREATE INDEX IF NOT EXISTS idx_taa_status ON thread_ai_anno(status);
+
 -- ---------------------------------------------------------------- 词表
 --: ★ 2026-11-05 新增（优化报告 P1-1）：课件「建立『词表』，关键词设计」。
 --:
@@ -1119,8 +1141,36 @@ class DB:
     #: 导出新增的列（2026-11-05 · 优化报告 P0-2；2026-11-05 再加「词表命中」P1-1）
     #: 「三维标签」= **人工优先**后的最终值；「规则三维标签」= 规则算的原值
     #:   （两者都留 → 人工值怎么来的、规则值是什么，都可复核）
+    #: 2026-11-08 加「AI初筛结论」「AI初筛模型」两列（优化报告 P2-5）：
+    #: 课件字段⑥要的是「AI 初筛结果」与「人工复核结果」**并列可对照**，
+    #:   所以 AI 的结论单独成两列，不塞进「核验结论」里混淆。
     EXPORT_EXTRA_COLS = ["发现时间", "原文摘要", "核验结论", "候选池路径", "系统诊断",
-                         "词表命中", "三维标签", "规则三维标签"]
+                         "词表命中", "三维标签", "规则三维标签",
+                         "AI初筛结论", "AI初筛模型"]
+
+    def get_ai_anno(self, tid: int) -> Dict[str, Any]:
+        """取一条帖的 AI 初注建议（没有就返回空 dict）。"""
+        r = self.conn.execute(
+            "SELECT * FROM thread_ai_anno WHERE tid=?", (int(tid),)).fetchone()
+        if not r:
+            return {}
+        d = dict(r)
+        for k in ("tags", "dropped"):
+            try:
+                d[k] = json.loads(d.get(k) or "[]")
+            except ValueError:
+                d[k] = []
+        # ★ 疑点判定：结论待核验 / 有标签被丢弃 / 结论缺失 → 必须人工确认
+        doubts = []
+        if (d.get("verdict") or "") == "待核验":
+            doubts.append("结论是「待核验」")
+        if d.get("dropped"):
+            doubts.append("有 %d 个标签不在候选清单里" % len(d["dropped"]))
+        if not (d.get("verdict") or ""):
+            doubts.append("模型没给出合法结论")
+        d["doubts"] = doubts
+        d["needs_review"] = bool(doubts)
+        return d
 
     def export_csv(self, path: str) -> int:
         """导出正式样本 CSV（**交付物**），返回导出行数。
@@ -1181,6 +1231,9 @@ class DB:
         from .anno import anno_tag_map_text, merge_tags
         anno_tags = anno_tag_map_text(self.conn)
         final_tags = merge_tags(dim_tags, anno_tags)
+        # AI 初筛结果（P2-5）：独立表，一次查完 → {tid: 行}
+        ai_rows = {int(r["tid"]): r for r in self.conn.execute(
+            "SELECT tid,verdict,reason,model FROM thread_ai_anno")}
 
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
@@ -1208,6 +1261,9 @@ class DB:
                     " / ".join(kw_words.get(tid) or []),
                     final_tags.get(tid) or "",
                     dim_tags.get(tid) or "",
+                    (("%s｜%s" % (ai_rows[tid]["verdict"], ai_rows[tid]["reason"]))
+                     if tid in ai_rows and (ai_rows[tid]["verdict"] or "") else ""),
+                    (ai_rows[tid]["model"] or "") if tid in ai_rows else "",
                 ])
         return len(rows)
 

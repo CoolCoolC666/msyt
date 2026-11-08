@@ -104,6 +104,7 @@ def main() -> int:
     # ★ 领活要真调一次才知道通不通 —— 但它**会写库**。
     #   所以：调完立刻把领到的那几条删回去，末尾再核对行数没变。
     q_before = db.conn.execute("SELECT COUNT(*) FROM anno_queue").fetchone()[0]
+    tids_before = {int(r["tid"]) for r in db.conn.execute("SELECT tid FROM anno_queue")}
     d = call("/api/anno/claim", "POST", {"limit": 3}, tok=atok)
     check(d.get("claimed", 0) >= 1,
           f"领活成功：领到 {d.get('claimed')} 条（任务 {d.get('task_code')}）")
@@ -113,8 +114,15 @@ def main() -> int:
     check(len(d.get("items") or []) >= 1, "领到的活出现在队列里")
     d = call("/api/anno/batches", tok=atok)
     check(len(d.get("items") or []) >= 1, "领到的活出现在批次视图里")
-    # 领完立刻撤回，保持真库干净
-    db.conn.execute("DELETE FROM anno_queue WHERE state='queued'")
+    # 领完立刻撤回，保持真库干净。
+    # ★ 2026-11-08 修：原来写的是 DELETE ... WHERE state='queued'（**宽条件**），
+    #   → 把**别人队列里的活**也删了（真库被清掉 19 条组员刚领的活）。
+    #   验收脚本只该动**自己这次造出来的**数据。
+    tids_after = {int(r["tid"]) for r in db.conn.execute("SELECT tid FROM anno_queue")}
+    new_tids = tids_after - tids_before
+    if new_tids:
+        db.conn.executemany("DELETE FROM anno_queue WHERE tid=?",
+                            [(t,) for t in new_tids])
     db.conn.commit()
     q_restored = db.conn.execute("SELECT COUNT(*) FROM anno_queue").fetchone()[0]
     check(q_restored == q_before,

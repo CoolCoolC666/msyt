@@ -667,3 +667,11 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); }
 .anno-dim .lbl { display: inline-block; width: 42px; font-weight: 600; color: var(--ink-2); }
 .verdict-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+
+/* ---------------------------------------------------------------- AI 初注 */
+.anno-ai {
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px dashed var(--line); border-radius: 8px;
+  background: var(--accent-soft);
+}
+.anno-ai .secttl { margin-top: 0; }

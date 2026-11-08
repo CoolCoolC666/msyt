@@ -237,9 +237,13 @@ function showSub(sub) {
     loadOnline();
     pollHelper();
   }
-  if (target === 'me') { renderMe(); }
+  // 「我的账号」里有 AI 初注设置卡：进这个子页就要把配置拉出来（admin 才显示）
+  if (target === 'me') { renderMe(); loadAiConfig(); }
+  // 领活范围的下拉要有选项 → 先把字典拉下来再克隆（以前是脚本加载时克隆一次，
+  //   那时检索页字典还没填 → 四个下拉全是空的，用户没法选）
   if (target === 'anno') { loadAnnoQueue(); loadAnnoPending();
-    loadAnnoBatches(); loadAnnoAgreement(); }
+    loadAnnoBatches(); loadAnnoAgreement(); ensureAnnoFilters();
+    resumeAiJob(); }
 }
 
 $$('#collect-subtabs button').forEach(btn => {
@@ -867,6 +871,7 @@ async function openThread(tid) {
       }).join('');
     }
     $('#dw-body').innerHTML = html;
+    appendAiToDrawer(tid);
   } catch (e) {
     $('#dw-title').textContent = '载入失败';
     $('#dw-body').innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
@@ -3586,7 +3591,11 @@ function renderAnno() {
     + esc((it.review && it.review.reason) || '') + '</textarea>'
     + dimsHtml
     + '<div class="row"><button class="primary" id="anno-submit">提交并下一条（Ctrl+Enter）</button>'
-    + '<span class="hint" id="anno-hint"></span></div></div>';
+    + '<span class="hint" id="anno-hint"></span></div>'
+    + '<div class="row"><button class="ghost tiny" id="anno-ai-run">AI 初注这一条</button>'
+    + '<span class="hint" id="anno-ai-hint">AI 只给建议；作数的是人工标注。</span></div>'
+    + aiCardHtml(it.ai)
+    + '</div>';
   $$('#anno-body .verdict-btn').forEach(b => {
     b.onclick = () => {
       annoState.verdict = b.dataset.v;
@@ -3604,6 +3613,10 @@ function renderAnno() {
     };
   });
   $('#anno-submit').onclick = submitAnno;
+  const aiRun = document.getElementById('anno-ai-run');
+  if (aiRun) aiRun.onclick = function () { runAiSuggest(annoState.tid); };
+  const aiAdopt = document.getElementById('anno-ai-adopt');
+  if (aiAdopt) aiAdopt.onclick = function () { adoptAi(annoState.tid); };
 }
 
 async function submitAnno() {
@@ -3643,11 +3656,12 @@ async function loadAnnoPending() {
       + '<td class="sub2">' + esc(x.tag) + '</td>'
       + '<td class="sub2">' + esc(x.annotator || '') + '</td>'
       + '<td class="sub2">' + esc(x.annotated_at || '') + '</td>'
+      + '<td><input type="checkbox" class="anno-pick" value="' + esc(x.tid) + '"></td>'
       + '<td class="nowrap"><button class="tiny" data-ok="' + esc(x.tid) + '">通过</button>'
       + ' <button class="tiny" data-no="' + esc(x.tid) + '">打回</button></td></tr>').join('');
-    $('#t-anno-pending').innerHTML = '<thead><tr><th>TID</th><th>标题</th><th>维度</th>'
+    $('#t-anno-pending').innerHTML = '<thead><tr><th>选</th><th>TID</th><th>标题</th><th>维度</th>'
       + '<th>标签</th><th>标注人</th><th>标注时间</th><th>操作</th></tr></thead><tbody>'
-      + (rows || '<tr><td colspan="7" class="hint">没有待复核的标注</td></tr>') + '</tbody>';
+      + (rows || '<tr><td colspan="8" class="hint">没有待复核的标注</td></tr>') + '</tbody>';
     $$('#t-anno-pending [data-ok]').forEach(b => {
       b.onclick = async () => {
         try {
@@ -3696,8 +3710,14 @@ if (annoClaimBtn) annoClaimBtn.onclick = async () => {
   const raw = (document.getElementById('anno-claim-n') || {}).value || '20';
   const limit = parseInt(raw, 10) > 0 ? parseInt(raw, 10) : 20;
   try {
+    const fil = {};
+    [['cl-category', 'category'], ['cl-state', 'state'],
+     ['cl-group', 'group'], ['cl-district', 'district']].forEach(function (pair) {
+      const el = document.getElementById(pair[0]);
+      if (el && el.value) fil[pair[1]] = el.value;
+    });
     const d = await api('/api/anno/claim', {
-      method: 'POST', body: JSON.stringify({ limit: limit }),
+      method: 'POST', body: JSON.stringify(Object.assign({ limit: limit }, fil)),
     });
     if (!d.claimed) { toast(d.hint || '候选池空了', true); return; }
     toast('领到 ' + d.claimed + ' 条（任务 ' + d.task_code + '）');
