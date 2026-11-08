@@ -80,6 +80,8 @@ def main() -> int:
     check(call("/api/anno/queue/by-filter", "POST",
                      {"limit": 1, "assignee": "x"}).get("_http") == 401,
           "批量派活：未登录 401")
+    check(call("/api/anno/claim", "POST", {"limit": 1}).get("_http") == 401,
+          "领活：未登录 401")
 
     # ---- ② 管理员只读 ----
     print("\n--- ② 管理员只读 ---")
@@ -99,6 +101,24 @@ def main() -> int:
     d = call("/api/anno/agreement", tok=atok)
     check("annotated" in d and "thread_pct" in d,
           f"一致性返回统计：{d.get('annotated')} 条已标注")
+    # ★ 领活要真调一次才知道通不通 —— 但它**会写库**。
+    #   所以：调完立刻把领到的那几条删回去，末尾再核对行数没变。
+    q_before = db.conn.execute("SELECT COUNT(*) FROM anno_queue").fetchone()[0]
+    d = call("/api/anno/claim", "POST", {"limit": 3}, tok=atok)
+    check(d.get("claimed", 0) >= 1,
+          f"领活成功：领到 {d.get('claimed')} 条（任务 {d.get('task_code')}）")
+    check(str(d.get("task_code", "")).startswith("L"),
+          f"领到的活归一个批次：{d.get('task_code')}")
+    d = call("/api/anno/queue", tok=atok)
+    check(len(d.get("items") or []) >= 1, "领到的活出现在队列里")
+    d = call("/api/anno/batches", tok=atok)
+    check(len(d.get("items") or []) >= 1, "领到的活出现在批次视图里")
+    # 领完立刻撤回，保持真库干净
+    db.conn.execute("DELETE FROM anno_queue WHERE state='queued'")
+    db.conn.commit()
+    q_restored = db.conn.execute("SELECT COUNT(*) FROM anno_queue").fetchone()[0]
+    check(q_restored == q_before,
+          f"领活测试的活已撤回（{q_before} → {q_restored}）")
 
     # ---- ③ 成员 ----
     print("\n--- ③ 成员 ---")

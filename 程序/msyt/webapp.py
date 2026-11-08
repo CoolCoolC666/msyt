@@ -1673,6 +1673,31 @@ def api_anno_review(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     return r
 
 
+@app.post("/api/anno/claim")
+def api_anno_claim(request: Request, req: dict = Body(default={})) -> Dict[str, Any]:
+    """**领活**：从候选池领一批帖进自己的标注队列。
+
+    ★ 组员打开标注台就有活可干 —— 不用等管理员派活。
+      协作采集那边早就有同样的「领活」机制（assist.pick），
+      标注台照做：活先到池子里，谁都能领，领了归自己。
+    ★ 只能领**自己的**活（不存在「领给别人」这回事）。
+    """
+    m = _require_member(request)
+    svc = AnnoService(get_db(_cfg()), HUB)
+    me = m.get("node_id") or m.get("email") or ""
+    try:
+        limit = int(req.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    try:
+        r = svc.claim(me, limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    HUB.info(me, f"领活 {r.get('claimed', 0)} 条（任务 {r.get('task_code')}）",
+             task=r.get("task_code") or "")
+    return r
+
+
 @app.post("/api/anno/queue/by-filter")
 def api_anno_enqueue_by_filter(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
     """按**筛选条件**批量派活（管理员）：同一套检索口径，不用手打 TID。

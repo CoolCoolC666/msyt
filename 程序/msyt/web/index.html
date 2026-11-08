@@ -505,12 +505,20 @@
           <b>J</b> 下一条　<b>K</b> 上一条（只翻看，不提交）　<b>Esc</b> 清空理由框
         </p>
         <div class="row">
+          <button class="primary" id="anno-claim">领一批活</button>
+          <input id="anno-claim-n" type="number" value="20" min="1" max="200"
+                 style="max-width:80px" title="这次领多少条">
           <input id="anno-tid" placeholder="按 TID 加入队列（如 8074300）" style="max-width:280px">
           <input id="anno-assignee" placeholder="派给（可空=自己；管理员可填成员邮箱）" style="max-width:320px">
           <button id="anno-add">加入标注队列</button>
           <button id="anno-refresh">刷新队列</button>
           <span class="hint" id="anno-stats"></span>
         </div>
+        <p class="hint">
+          ★ <b>「领一批活」就是干活的入口</b>：从候选池（已采到正文、还没人标过、
+          也不在任何人队列里的帖）领一批到自己名下，不用等管理员派。
+          下面「批量派活」是管理员按条件给<b>别人</b>派活。
+        </p>
         <div class="tablewrap"><table id="t-anno-queue"></table></div>
       </div>
 

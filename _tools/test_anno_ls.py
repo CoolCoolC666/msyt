@@ -223,7 +223,58 @@ def main() -> int:
     check(ag.get("dims") == {} and ag.get("changed_tags") == [],
           "空结构各字段齐全")
 
-    # ---- ④ ★反向验证（改坏实现 → 同一批断言必须报红） ----
+    # ---- ④ 领活（组员自助取活）----
+    print("\n--- ④ 领活 ---")
+    # 新库：清掉队列，从零领
+    db.conn.execute("DELETE FROM anno_queue")
+    db.conn.commit()
+    r = svc.claim("node:m", limit=10)
+    check(r["claimed"] == 4,
+          f"候选池里 4 条已采正文帖可领（实得 {r}）")
+    check(r["task_code"].startswith("L"), f"领到的活归一个批次：{r['task_code']}")
+    q = svc.queue("node:m")
+    check(len(q) == 4, f"领到的 4 条进了自己的队列（实得 {len(q)}）")
+    check(all(x["assignee"] == "node:m" for x in q), "活归自己名下")
+    check(all(x["state"] == "queued" for x in q), "领到的都是待标")
+
+    # ★ 别人领过的**不会被抢走**（tid 是主键，抢了等于改掉对方的 assignee）
+    db.conn.execute("DELETE FROM anno_queue")
+    db.conn.commit()
+    svc.claim("node:m", limit=2)
+    r2 = svc.claim("node:x", limit=10)
+    ids_m = {x["tid"] for x in svc.queue("node:m")}
+    ids_x = {x["tid"] for x in svc.queue("node:x")}
+    check(not (ids_m & ids_x),
+          f"★ 两个成员领到的活不重叠（m={len(ids_m)} x={len(ids_x)}）")
+    check(r2["claimed"] == 2, f"node:x 领到剩下 2 条（实得 {r2['claimed']}）")
+
+    # ★ 已标注过的帖不再进候选池（不重复标同一条）
+    db.conn.execute("DELETE FROM anno_queue")
+    db.conn.commit()
+    done_tid = svc.claim("node:m", limit=1)["claimed"]
+    first = [x["tid"] for x in svc.queue("node:m")][0]
+    svc.submit("node:m", first, "纳入", "标过了", [["relation", "官民"]])
+    db.conn.execute("DELETE FROM anno_queue")
+    db.conn.commit()
+    r3 = svc.claim("node:m", limit=10)
+    got = {x["tid"] for x in svc.queue("node:m")}
+    check(first not in got,
+          f"★ 已标注过的帖不再进候选池（tid={first}）")
+
+    # 候选池空时给提示而不是静默
+    db.conn.execute("DELETE FROM anno_queue")
+    db.conn.execute("DELETE FROM thread_anno_tags")
+    db.conn.commit()
+    # 把所有已采正文的帖都标掉 → 候选池空
+    db.conn.execute("INSERT INTO thread_anno_tags(tid,dim,tag,annotator,status) "
+                    "SELECT tid,'relation','x','n','submitted' FROM threads "
+                    "WHERE detail_state='done'")
+    db.conn.commit()
+    r4 = svc.claim("node:m", limit=10)
+    check(r4["claimed"] == 0 and r4.get("hint"),
+          f"候选池空时给提示：{r4}")
+
+    # ---- ⑤ ★反向验证（改坏实现 → 同一批断言必须报红） ----
     print("\n--- ④ ★反向验证 ---")
     # ★ 用**独立的临时库**：反向验证要改坏实现再改回来，
     #   在同一个库上重跑会撞主键/残留状态，断言就不干净了。
@@ -306,6 +357,36 @@ def main() -> int:
     AnnoService.enqueue_filter = orig_filter
     check(not expect_red(assert_filter_skips_undone),
           "反向验证④收尾：恢复后断言通过")
+
+    def assert_claim_no_overlap():
+        db2.conn.execute("DELETE FROM anno_queue")
+        db2.conn.execute("DELETE FROM thread_anno_tags")
+        db2.conn.commit()
+        svc2.claim("node:m", limit=2)
+        # ★ 记下 node:m 领走了哪些 —— 后来的领活**不能把它们抢走**
+        ids_m = {x["tid"] for x in svc2.queue("node:m")}
+        svc2.claim("node:x", limit=10)
+        still_m = {x["tid"] for x in svc2.queue("node:m")}
+        assert ids_m == still_m, "node:m 的活被抢走了：丢了 %s" % (ids_m - still_m)
+
+    # 反向验证⑤：把候选池的「排除已在队列」这一条打坏 → 断言必须报红
+    orig_claim = AnnoService.claim
+    def bad_claim(self, assignee="", limit=20):
+        # 不排除已在队列里的 → 会跟别人领到同一条
+        rows = self.db.conn.execute(
+            "SELECT tid FROM threads WHERE detail_state='done' LIMIT ?",
+            (max(1, int(limit)),)).fetchall()
+        tids = [int(r["tid"]) for r in rows]
+        r = self.enqueue(tids, assignee)
+        r["claimed"] = r["queued"]
+        return r
+
+    AnnoService.claim = bad_claim
+    check(expect_red(assert_claim_no_overlap),
+          "反向验证⑤：打坏「领活不抢别人的活」→ 断言报红")
+    AnnoService.claim = orig_claim
+    check(not expect_red(assert_claim_no_overlap),
+          "反向验证⑤收尾：恢复后断言通过")
 
     print("\n" + "=" * 62)
     if FAILED:

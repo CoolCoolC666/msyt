@@ -3454,7 +3454,8 @@ async function loadAnnoQueue() {
       + '<td class="sub2">' + esc(x.dept_name || '') + '</td></tr>').join('');
     $('#t-anno-queue').innerHTML = '<thead><tr><th>TID</th><th>标题</th><th>状态</th>'
       + '<th>任务</th><th>部门</th></tr></thead><tbody>'
-      + (rows || '<tr><td colspan="5" class="hint">队列是空的 —— 上面按 TID 加一条</td></tr>')
+      + (rows || '<tr><td colspan="5" class="hint">队列是空的 —— 点上面「领一批活」'
+          + '（或按 TID 加一条）</td></tr>')
       + '</tbody>';
     $$('#t-anno-queue tr[data-anno]').forEach(tr => {
       tr.onclick = () => openAnno(tr.dataset.anno);
@@ -3687,6 +3688,24 @@ if (annoAddBtn) annoAddBtn.onclick = async () => {
 };
 const annoRefreshBtn = document.getElementById('anno-refresh');
 if (annoRefreshBtn) annoRefreshBtn.onclick = loadAnnoQueue;
+
+/* ★ 领活：从候选池领一批帖到自己名下（2026-11-06）
+   —— 组员打开标注台就有活干，不用等管理员派 */
+const annoClaimBtn = document.getElementById('anno-claim');
+if (annoClaimBtn) annoClaimBtn.onclick = async () => {
+  const raw = (document.getElementById('anno-claim-n') || {}).value || '20';
+  const limit = parseInt(raw, 10) > 0 ? parseInt(raw, 10) : 20;
+  try {
+    const d = await api('/api/anno/claim', {
+      method: 'POST', body: JSON.stringify({ limit: limit }),
+    });
+    if (!d.claimed) { toast(d.hint || '候选池空了', true); return; }
+    toast('领到 ' + d.claimed + ' 条（任务 ' + d.task_code + '）');
+    await loadAnnoQueue();
+    const next = (annoState.queue || []).find(x => x.state !== 'done');
+    if (next) await openAnno(next.tid);
+  } catch (e) { toast(e.message, true); }
+};
 
 /* ★ 批量派活：按筛选条件抽一批帖入队（2026-11-06 Label Studio 化）
    —— 不用手打 TID，口径跟检索页一致 */

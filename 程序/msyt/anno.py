@@ -254,6 +254,42 @@ class AnnoService:
             "ORDER BY a.annotated_at DESC, a.tid LIMIT ?",
             (max(1, int(limit)),)).fetchall()]
 
+    # ---------------------------------------------------------------- 领活
+    def claim(self, assignee: str = "", limit: int = 20) -> Dict[str, Any]:
+        """**领活**：从候选池领一批帖进自己的标注队列。
+
+        ★ 为什么要有这个：标注台是**自己干活的地方**，
+          但入队只有「管理员派活」和「手打 TID」两条路 ——
+          组员打开标注台看到的是**空队列**，什么也干不了。
+          协作采集那边早就有「领活」了（assist.pick），
+          标注台照同样做法：**活先到池子里，谁都能领**。
+
+        ★ 候选池 = 「已采到正文 + 没人标过 + 不在任何人队列里」的帖。
+          排除「已在队列里」的 → 不会把别人的活抢走（tid 是主键，
+          抢了就是把对方的 assignee 改掉）。
+          排除「已标注过」的 → 不重复标同一条。
+
+        ★ 领到的活归到一个**自己的批次**（L 编号），这样批次视图里
+          能看出「这批是谁的、标到哪了」。
+        """
+        limit = max(1, min(int(limit or 20), 200))
+        # 候选池查询：已采正文 + 不在队列 + 没人工标注
+        rows = self.db.conn.execute(
+            "SELECT t.tid FROM threads t "
+            "LEFT JOIN anno_queue q ON q.tid=t.tid "
+            "LEFT JOIN thread_anno_tags a ON a.tid=t.tid "
+            "WHERE t.detail_state='done' AND q.tid IS NULL AND a.tid IS NULL "
+            "ORDER BY t.pub_ts DESC, t.tid DESC LIMIT ?",
+            (limit,)).fetchall()
+        tids = [int(r["tid"]) for r in rows]
+        if not tids:
+            return {"task_code": "", "claimed": 0,
+                    "hint": "候选池空了：没有「已采到正文、还没人标过、"
+                            "也不在任何人队列里」的帖"}
+        r = self.enqueue(tids, assignee)
+        r["claimed"] = r["queued"]
+        return r
+
     # ---------------------------------------------------------------- 批量派活
     def enqueue_filter(self, assignee: str = "", task_code: str = "",
                         limit: int = 50, **filters: Any) -> Dict[str, Any]:
