@@ -19,8 +19,14 @@ ENV["PYTHONIOENCODING"] = "utf-8"
 PAT = re.compile(r"共\s*(\d+)\s*项\s*·\s*通过\s*(\d+)\s*·\s*失败\s*(\d+)")
 
 rows = []
+# ★ 排除**破坏性**脚本：它们会改坏被测物（分发包）再改回来，
+#   一旦中途被超时打断就会留下坏包 → 不能混进一键全量回归。
+#   （test_dist_reverse.py 就是这种：改包 → 跑闸 → 恢复包）
+SKIP_FILES = {"test_dist_reverse.py"}
+
 files = sorted(f for f in os.listdir(HERE)
-               if f.startswith("test_") and f.endswith(".py"))
+               if f.startswith("test_") and f.endswith(".py")
+               and f not in SKIP_FILES)
 print(f"共 {len(files)} 个测试脚本\n" + "=" * 70)
 total_ok = total_fail = total_n = 0
 for fn in files:

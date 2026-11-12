@@ -227,12 +227,14 @@ def main() -> int:
     check_deps()
     check_config()
     print("-" * 60)
+    # ★ 汇总行格式必须跟 run_all_tests.py 认的一致
+    #   （`共 N 项 · 通过 N · 失败 N`）—— 否则回归器认不出 → 误判成 FAIL。
+    print("共 %d 项 · 通过 %d · 失败 %d"
+          % (CHECKS[0], CHECKS[0] - len(FAILS), len(FAILS)))
     if FAILS:
-        print("FAIL %d / %d" % (len(FAILS), CHECKS[0]))
         for f in FAILS:
             print("  - " + f)
         return 1
-    print("PASS 全部 %d 项" % CHECKS[0])
     return 0
 
 

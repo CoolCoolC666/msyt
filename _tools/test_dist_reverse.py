@@ -110,13 +110,30 @@ def mut_manifest_gone():
     (PKG / "manifest.json").unlink()
 
 
+def _cleanup() -> None:
+    """被打断（Ctrl-C / 超时 kill）时也要把包恢复原样 —— 
+    否则会留下一个「少了几行数据」或「多了个 manifest」的坏包。"""
+    if BACKUP.exists():
+        try:
+            restore_pkg()
+            print("[cleanup] 包已恢复原样")
+        except Exception as e:      # 恢复失败要看得见，不能静默
+            print("[cleanup] 恢复失败：%s（备份还在 %s，手动拷回）" % (e, BACKUP))
+
+
 if __name__ == "__main__":
     if not PKG.exists():
         print("分发包目录不存在：%s" % PKG)
         sys.exit(2)
     if BACKUP.exists():
+        # 上一次跑被打断 → 手里这份备份就是**完好包**，先恢复再重跑
+        print("发现残留备份（上次跑被打断），先恢复包 ...")
+        restore_pkg()
         shutil.rmtree(BACKUP, ignore_errors=True)
     shutil.copytree(PKG, BACKUP)
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: (_cleanup(), sys.exit(130)))
+    signal.signal(signal.SIGTERM, lambda *_: (_cleanup(), sys.exit(143)))
     print("backup done")
     results = []
     results.append(case("源码里塞真实邮箱", mut_email))
