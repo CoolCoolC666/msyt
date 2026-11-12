@@ -15,10 +15,12 @@ build_dist.py —— 生成「组员本地玩」分发包
       - 删 meta 的 jwt_secret（重新生成）与 agent_state:*（含成员节点状态）
       - 清空 members.pw_hash → **任何人都登不进原账号**
       - 源码里的真实邮箱/域名 → 占位符（不让本机包指向我们的公网入口）
-  · 登录：包内 config.json 把管理员指向 **本地新账号** local@msyt.local，
-          首次启动 ensure_admin 现生成随机口令（打印到窗口 + 写 data/admin-*.txt）。
-          → 包里**没有任何固定口令**；自助注册也放开（注册即可用）。
+  · 登录：**账号系统做成可开关的设施**（config.json 的 auth_enabled，默认 true）。
+          分发版置 false → 免登录直进管理员界面，不建账号、不写口令文件；
+          服务器端不写这个键 → 行为与从前完全一致。
   · 依赖：requirements.txt + 启动.cmd（纯 ASCII + CRLF，缺什么装什么）。
+  · 快照基线：构建时把各业务表的行数写进包内 manifest.json，
+          让验收闸能跟**固定基线**对账（不跟活库对账——活库一直在长）。
 
 用法：
   python _tools/build_dist.py --out "<落点目录>" [--zip]
@@ -26,6 +28,7 @@ build_dist.py —— 生成「组员本地玩」分发包
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sqlite3
@@ -143,6 +146,45 @@ def copy_db(dst_root: Path) -> int:
         dst.close()
         src.close()
     return dst_db.stat().st_size
+
+
+#: 快照基线要记的表（业务数据量，用于验收闸对账）
+BASELINE_TABLES = ("threads", "posts", "flows", "thread_tags",
+                   "thread_opinion_cards", "keywords")
+
+
+def write_baseline(dst_root: Path) -> dict:
+    """把**快照时刻**各业务表的行数写进包内 manifest.json。
+
+    ★ 为什么要有它：验收闸若拿**活着的真库**跟包对账，真库会随组员回传
+      与采集不断增长 → 快照永远追不上 → 闸会随机变红（假故障）。
+      改成三段对账（都不随真库变化而误报）：
+        ① 包内实际 == manifest.tables        → 包在构建后被弄坏了（少行/多行）
+        ② manifest.source_tables >= tables   → 快照没有超前于真库（没造数据）
+        ③ source_tables >= tables            → 快照期间真库新增（并发，正常）
+    """
+    db = sqlite3.connect(str(dst_root / "data" / "msyt.db"))
+    counts = {}
+    for t in BASELINE_TABLES:
+        try:
+            counts[t] = db.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+        except sqlite3.Error:
+            continue
+    db.close()
+    src = {}
+    sdb = sqlite3.connect("file:" + str(SRC_DB).replace("\\", "/") + "?mode=ro",
+                           uri=True)
+    for t in BASELINE_TABLES:
+        try:
+            src[t] = sdb.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+        except sqlite3.Error:
+            continue
+    sdb.close()
+    man = {"snapshot_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "tables": counts, "source_tables": src}
+    (dst_root / "manifest.json").write_text(
+        json.dumps(man, ensure_ascii=False, indent=2), encoding="utf-8")
+    return counts
 
 
 def sanitize(dst_root: Path) -> dict:
@@ -356,7 +398,9 @@ def build(out: Path, make_zip: bool) -> None:
     anon = anonymize(out)
     for k, v in anon.items():
         print("      anon %s = %s" % (k, v), flush=True)
-    print("[4/4] writing package files ... done", flush=True)
+    print("[4/4] writing package files ...", flush=True)
+    base = write_baseline(out)
+    print("      baseline tables = %s" % base, flush=True)
     write_text(out / "requirements.txt", REQUIREMENTS)
     write_text(out / "config.json", CONFIG_JSON)
     write_text(out / "启动.cmd", START_CMD, ascii_only=True)

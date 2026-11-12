@@ -8,7 +8,8 @@ test_dist_package.py —— 分发包验收闸
      真实成员邮箱 / 本机路径 / 我们的域名）
   ③ 依赖清单齐全（包内 import 的第三方模块都得在 requirements.txt 里）
   ④ 启动.cmd 是纯 ASCII + CRLF（双击不闪退）
-  ⑤ 数据是全量（threads/posts 行数与真库一致）
+  ⑤ 数据是全量（各业务表行数与**包内基线** manifest.json 一致；
+     不跟活着的真库对账 —— 真库会随组员回传增长，快照追不上）
   ⑥ 数据库能开、查询正常、FTS 索引在
 
 ★ 反向验证：把包里的东西改坏（塞一条真邮箱 / 改 CRLF / 删依赖），
@@ -16,6 +17,7 @@ test_dist_package.py —— 分发包验收闸
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -126,19 +128,17 @@ def scan_db() -> None:
                             break
         check(not leak, "库内文本列没有真实邮箱/域名" +
               ("" if not leak else "：" + "、".join(sorted(set(leak))[:8])))
-        # 数据是全量
-        if REAL_DB.exists():
-            r2 = sqlite3.connect("file:" + str(REAL_DB).replace("\\", "/")
-                                 + "?mode=ro", uri=True)
-            for tbl in ("threads", "posts", "flows", "thread_tags",
-                        "thread_opinion_cards", "keywords"):
-                try:
-                    a = r2.execute("SELECT COUNT(*) FROM %s" % tbl).fetchone()[0]
-                    b = c.execute("SELECT COUNT(*) FROM %s" % tbl).fetchone()[0]
-                except sqlite3.Error:
-                    continue
-                check(a == b, "%s 行数与真库一致（%d == %d）" % (tbl, b, a))
-            r2.close()
+        # 数据是全量 —— 跟**包内基线**对账，不跟活着的真库对账
+        # （真库会随组员回传/采集不断增长 → 快照永远追不上 → 闸随机变红）
+        man = json.loads((PKG / "manifest.json").read_text(encoding="utf-8"))
+        base = man["tables"]
+        src = man.get("source_tables", {})
+        for tbl, want in base.items():
+            b = c.execute("SELECT COUNT(*) FROM %s" % tbl).fetchone()[0]
+            check(b == want, "%s 行数与包内基线一致（%d == %d）" % (tbl, b, want))
+            if tbl in src:
+                check(src[tbl] >= want,
+                      "%s 快照未超前于真库（基线 %d <= 真库 %d）" % (tbl, want, src[tbl]))
         # FTS 还在（检索功能依赖）
         try:
             n = c.execute("SELECT COUNT(*) FROM posts_fts").fetchone()[0]
@@ -153,7 +153,8 @@ def check_layout() -> None:
     for rel in ("msyt/__init__.py", "msyt/cli.py", "msyt/webapp.py",
                 "msyt/web/index.html", "msyt/web/app.js", "msyt/web/card.js",
                 "msyt/web/style.css", "data/msyt.db", "启动.cmd",
-                "requirements.txt", "说明.txt", "config.json"):
+                "requirements.txt", "说明.txt", "config.json",
+                "manifest.json"):
         check((PKG / rel).exists(), "结构齐全：%s" % rel)
     check(not (PKG / "msyt" / "__pycache__").exists(), "没有 __pycache__")
     check(not (PKG / "msyt" / "web" / "_preview_bars.html").exists(),
