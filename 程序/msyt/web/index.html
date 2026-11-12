@@ -180,6 +180,12 @@
         <option value="100">100 条/页</option>
       </select>
     </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btn-card-batch">批量生成卡片（当前页）</button>
+      <button class="ghost card-stop hidden" id="card-stop">停止这一轮</button>
+      <span class="hint" id="card-batch-state"></span>
+    </div>
+    <div class="logbox" id="card-log"><p class="hint">舆情卡片的逐条进度（还没开始跑）</p></div>
   </div>
 </section>
 
@@ -593,6 +599,13 @@
           <span class="hint" id="anno-ai-state"></span>
         </div>
         <div class="logbox" id="anno-ai-log"><p class="hint">AI 初注的逐条进度（还没开始跑）</p></div>
+        <div class="row">
+          <button id="anno-card-batch">批量生成卡片（当前队列）</button>
+          <button class="ghost card-stop hidden" id="anno-card-stop">停止这一轮</button>
+          <span class="hint" id="anno-card-state"></span>
+          <span class="hint" id="anno-card-stats"></span>
+        </div>
+        <div class="logbox" id="anno-card-log"><p class="hint">舆情卡片的逐条进度（还没开始跑）</p></div>
         <p class="hint">
           ★ <b>「领一批活」就是干活的入口</b>：从候选池（已采到正文、还没人标过、
           也不在任何人队列里的帖）领一批到自己名下，不用等管理员派。
@@ -868,5 +881,6 @@
 <script src="/static/int_state.js?v=__ISV__"></script>
 <script src="/static/app.js?v=__JSV__"></script>
 <script src="/static/ai.js?v=__JSV__"></script>
+<script src="/static/card.js?v=__JSV__"></script>
 </body>
 </html>

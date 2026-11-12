@@ -473,6 +473,30 @@ CREATE TABLE IF NOT EXISTS thread_ai_anno (
 );
 CREATE INDEX IF NOT EXISTS idx_taa_status ON thread_ai_anno(status);
 
+-- ---------------------------------------------------------------- 舆情卡片（P2-6）
+--: ★ 2026-11-12 新增（优化报告 P2-6）：详情页上的**研判卡**（结论 + 理由 + 风险等级）。
+--:   这是**派生结论**，不是权威数据 → 单独存一张表，不与人工台账混。
+--:   四层字段各存各的列（facts/signals/ai/judge/advice），这样「哪一层是谁算的」
+--:   一眼能查；以后人工改某一层也不会把程序算的那层弄丢。
+--: ★ **不存 status**：过时（stale）是拿指纹现算的 —— 存下来就成了会自己过期的数。
+CREATE TABLE IF NOT EXISTS thread_opinion_cards (
+    tid        INTEGER PRIMARY KEY,
+    facts      TEXT NOT NULL DEFAULT '',   -- JSON: 第一层 确定性字段（程序算）
+    signals    TEXT NOT NULL DEFAULT '',   -- JSON: 第二层 研判信号（程序算）
+    ai         TEXT NOT NULL DEFAULT '',   -- JSON: 第三层 AI 生成 + 疑点
+    judge      TEXT NOT NULL DEFAULT '',   -- JSON: 事件性质/办理状态/风险等级
+    advice     TEXT NOT NULL DEFAULT '',   -- JSON: 处置建议
+    fingerprint TEXT NOT NULL DEFAULT '',  -- 数据快照指纹（时效判定用）
+    model      TEXT NOT NULL DEFAULT '',
+    protocol   TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT NOT NULL DEFAULT '',
+    edited_by  TEXT NOT NULL DEFAULT '',   -- 人工改过就留名字；非空 = 不被自动覆盖
+    edited_at  TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_toc_edited ON thread_opinion_cards(edited_by);
+
 -- ---------------------------------------------------------------- 词表
 --: ★ 2026-11-05 新增（优化报告 P1-1）：课件「建立『词表』，关键词设计」。
 --:
@@ -1171,6 +1195,80 @@ class DB:
         d["doubts"] = doubts
         d["needs_review"] = bool(doubts)
         return d
+
+    # ---------------------------------------------------------- 舆情卡片（P2-6）
+    CARD_JSON_COLS = ("facts", "signals", "ai", "judge", "advice")
+
+    def save_card(self, tid: int, data: Dict[str, Any],
+                  edited_by: str = "") -> None:
+        """写卡片。
+
+        ★ edited_by 非空 = 人工改过 → 之后自动生成**不覆盖**这条（要覆盖得人点头）。
+        ★ 卡片是派生结论，存自己的表；人工台账（sample_review）不动。
+        """
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            self.conn.execute(
+                """INSERT INTO thread_opinion_cards
+                   (tid,facts,signals,ai,judge,advice,fingerprint,model,protocol,
+                    prompt_version,edited_by,edited_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(tid) DO UPDATE SET
+                     facts=excluded.facts, signals=excluded.signals,
+                     ai=excluded.ai, judge=excluded.judge, advice=excluded.advice,
+                     fingerprint=excluded.fingerprint, model=excluded.model,
+                     protocol=excluded.protocol,
+                     prompt_version=excluded.prompt_version,
+                     edited_by=excluded.edited_by, edited_at=excluded.edited_at,
+                     updated_at=excluded.updated_at""",
+                (int(tid),
+                 json.dumps(data.get("facts") or {}, ensure_ascii=False),
+                 json.dumps(data.get("signals") or {}, ensure_ascii=False),
+                 json.dumps(data.get("ai") or {}, ensure_ascii=False),
+                 json.dumps(data.get("judge") or {}, ensure_ascii=False),
+                 json.dumps(data.get("advice") or {}, ensure_ascii=False),
+                 data.get("fingerprint") or "", data.get("model") or "",
+                 data.get("protocol") or "", data.get("prompt_version") or "",
+                 edited_by or "", now if edited_by else "",
+                 now, now))
+            self.conn.commit()
+
+    def get_card(self, tid: int) -> Dict[str, Any]:
+        """取一张卡（没有就返回空 dict）。"""
+        r = self.conn.execute(
+            "SELECT * FROM thread_opinion_cards WHERE tid=?", (int(tid),)).fetchone()
+        if not r:
+            return {}
+        d = dict(r)
+        for k in self.CARD_JSON_COLS:
+            try:
+                d[k] = json.loads(d.get(k) or "{}")
+            except ValueError:
+                d[k] = {}
+        return d
+
+    def card_stats(self) -> Dict[str, Any]:
+        """卡片覆盖情况。★ 分类统计在 Python 侧算（SQLite 没有 JSON 查询），
+        跟 cacx 的做法一样 —— 不为此给表加列。"""
+        threads = self.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+        with_body = self.conn.execute(
+            "SELECT COUNT(*) FROM threads WHERE detail_state='done'").fetchone()[0]
+        cards = self.conn.execute(
+            "SELECT COUNT(*) FROM thread_opinion_cards").fetchone()[0]
+        edited = self.conn.execute(
+            "SELECT COUNT(*) FROM thread_opinion_cards "
+            "WHERE COALESCE(edited_by,'')<>''").fetchone()[0]
+        levels: Dict[str, int] = {}
+        for r in self.conn.execute("SELECT judge FROM thread_opinion_cards"):
+            try:
+                lv = str((json.loads(r["judge"] or "{}") or {}).get("level") or "")
+            except ValueError:
+                lv = ""
+            if lv:
+                levels[lv] = levels.get(lv, 0) + 1
+        return {"threads": threads, "detail_done": with_body, "cards": cards,
+                "edited": edited, "by_level": levels,
+                "coverage": round(cards / with_body * 100, 2) if with_body else 0.0}
 
     def export_csv(self, path: str) -> int:
         """导出正式样本 CSV（**交付物**），返回导出行数。

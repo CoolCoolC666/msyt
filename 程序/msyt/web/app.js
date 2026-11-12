@@ -243,7 +243,7 @@ function showSub(sub) {
   //   那时检索页字典还没填 → 四个下拉全是空的，用户没法选）
   if (target === 'anno') { loadAnnoQueue(); loadAnnoPending();
     loadAnnoBatches(); loadAnnoAgreement(); ensureAnnoFilters();
-    resumeAiJob(); }
+    resumeAiJob(); resumeCardJob(); loadCardStats(); }
 }
 
 $$('#collect-subtabs button').forEach(btn => {
@@ -825,6 +825,8 @@ async function openThread(tid) {
     bits.push(`楼层 ${num(t.posts_n)} · 字数 ${num(t.chars)} · 页数 ${num(t.pages_total)}`);
 
     let html = `<div class="secttl">基本信息</div><div style="margin-bottom:12px">${bits.join(' &nbsp; ')}</div>`;
+    // ★ 舆情卡片（P2-6）：结论放在最前面，下面才是流程与楼层
+    html += '<div id="dw-card"></div>';
 
     if (t.detail_warn) html += `<div class="warnbox">${esc(t.detail_warn)}</div>`;
 
@@ -872,6 +874,7 @@ async function openThread(tid) {
     }
     $('#dw-body').innerHTML = html;
     appendAiToDrawer(tid);
+    renderCard(tid);
   } catch (e) {
     $('#dw-title').textContent = '载入失败';
     $('#dw-body').innerHTML = `<div class="errbox">${esc(e.message)}</div>`;

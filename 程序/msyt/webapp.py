@@ -57,6 +57,7 @@ from .assist import AssistService
 from .auth import (email_allowed, hash_pw, make_token, new_secret, read_token,
                    verify_pw)
 from . import ai
+from . import card
 from . import bundle
 from . import topic
 from .config import Config
@@ -1877,6 +1878,131 @@ def api_anno_review_batch(request: Request, req: dict = Body(...)) -> Dict[str, 
         return svc.review_batch(tids, approved, note, "")
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ---------------------------------------------------------------- 舆情卡片（P2-6）
+# ★ 2026-11-12：详情页上的研判卡（结论 + 理由 + 风险等级 + 处置建议）。
+#   卡片是**派生结论** → 单独存 thread_opinion_cards，不写人工台账。
+#   AI 只给建议，**直接显示**（用户 2026-11-12 拍板）；人工可改并留痕。
+
+
+@app.get("/api/threads/{tid}/card")
+def api_thread_card(request: Request, tid: int) -> Dict[str, Any]:
+    """取一条帖的舆情卡片（带**时效判定**：指纹变了 = 过时）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    svc = card.CardService(db)
+    c = svc.get(int(tid))
+    return {"card": c, "exists": bool(c)}
+
+
+@app.post("/api/anno/card/generate")
+def api_anno_card_generate(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**单条**生成舆情卡片。
+
+    ★ req["ai"] = 成员**自己的**配置（存他浏览器里）—— 只在这次请求里用。
+    ★ force=1：强制重生成（人工改过的卡片要人点头才能覆盖）。
+    """
+    _require_member(request)
+    db = get_db(_cfg())
+    svc = card.CardService(db, req.get("ai") or {})
+    try:
+        tid = int(req.get("tid") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tid 不合法")
+    if not tid:
+        raise HTTPException(400, "缺 tid")
+    try:
+        return svc.generate(tid, force=bool(req.get("force")))
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/jobs/card-batch")
+def api_job_card_batch(request: Request, req: dict = Body(...)) -> Dict[str, Any]:
+    """**批量**生成卡片 —— 后台任务 + 逐条进度（复用采集任务那套 job 机制）。
+
+    ★ **幂等**：已有卡片且指纹没变 → 跳过（不烧额度）。
+    ★ 成员的**个人 key** 只在闭包里用：不落盘、不进 job.params。
+    """
+    m = _require_member(request)
+    tids = []
+    for x in (req.get("tids") or []):
+        try:
+            tids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not tids:
+        raise HTTPException(400, "没给 tids")
+    limit = max(1, min(int(req.get("limit") or 20), 200))
+    tids = tids[:limit]
+    cfg_override = req.get("ai") or {}
+    node = str(m.get("node_id") or "")
+    job = JOBS.create("card_batch", {"tids": tids, "limit": limit}, node=node)
+
+    def _run(j: Job) -> Dict[str, Any]:
+        db = get_db(_cfg())
+        svc = card.CardService(db, cfg_override)
+        ok = skipped = failed = 0
+        stopped = ""
+        total = len(tids)
+        for i, tid in enumerate(tids, 1):
+            if j.should_stop():
+                stopped = "已停止"
+                j.log("已请求停止，剩下的没跑")
+                break
+            j.log("进度：%d/%d · tid=%d 开始" % (i, total, tid))
+            try:
+                r = svc.generate(tid)
+            except ai.AIError as e:
+                failed += 1
+                j.log("✗ tid=%d %s" % (tid, str(e)[:160]))
+                HUB.info(node, "舆情卡片失败 tid=%d：%s" % (tid, str(e)[:120]),
+                         task="card")
+                if e.fatal:
+                    stopped = str(e)[:160]
+                    j.log("致命错误 → 停手")
+                    break
+                continue
+            if r.get("skipped"):
+                skipped += 1
+                j.log("· tid=%d 已有卡片（未过时）→ 跳过" % tid)
+                continue
+            ok += 1
+            lv = (r.get("judge") or {}).get("level") or "—"
+            j.log("✓ tid=%d 风险等级=%s" % (tid, lv))
+            HUB.info(node, "舆情卡片 tid=%d 风险等级=%s" % (tid, lv), task="card")
+            time.sleep(0.3)
+        j.log("进度：%d/%d 完成（成功 %d，跳过 %d，失败 %d）"
+              % (total, total, ok, skipped, failed))
+        return {"ok": ok, "skipped": skipped, "failed": failed,
+                "stopped": stopped, "total": total}
+
+    JOBS.spawn(job, _run)
+    return {"job": job.to_dict(tail=0)}
+
+
+@app.post("/api/anno/card/{tid}/edit")
+def api_anno_card_edit(request: Request, tid: int,
+                        req: dict = Body(...)) -> Dict[str, Any]:
+    """人工改卡片（留痕）。★ 改过的不被自动重新生成覆盖。"""
+    m = _require_member(request)
+    db = get_db(_cfg())
+    svc = card.CardService(db)
+    editor = str(m.get("email") or m.get("node_id") or "")
+    patch = req.get("patch") if isinstance(req.get("patch"), dict) else req
+    try:
+        return svc.edit(int(tid), patch, editor)
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/anno/card/stats")
+def api_anno_card_stats(request: Request) -> Dict[str, Any]:
+    """卡片覆盖情况（界面上的数字要能对上「点下去会发生什么」）。"""
+    _require_member(request)
+    db = get_db(_cfg())
+    return db.card_stats()
 
 
 @app.post("/api/anno/queue/by-filter")

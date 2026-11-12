@@ -675,3 +675,32 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); }
   background: var(--accent-soft);
 }
 .anno-ai .secttl { margin-top: 0; }
+
+/* ---------------------------------------------------------------- 舆情卡片（P2-6，2026-11-12） */
+/* ★ 颜色 = 语义：灰=提示（只是信息） 黄=关注（要注意） 橙=预警（危险在升） 红=紧急 */
+.ocard-lv {
+  display: inline-block; padding: 2px 11px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; border: 1px solid transparent; white-space: nowrap;
+}
+.ocard-lv.lv0 { background: #f1f2f4; color: #5b6270; border-color: #dfe2e7; }
+.ocard-lv.lv1 { background: #fdf1e0; color: #8a5a08; border-color: #f0d6ab; }
+.ocard-lv.lv2 { background: #ffece0; color: #c2410c; border-color: #f8d3ac; }
+.ocard-lv.lv3 { background: var(--danger-soft); color: var(--danger); border-color: #f2c3bf; }
+.ocard-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 10px; }
+.ocard-why { font-size: 13px; color: var(--ink-2); }
+.ocard-facts {
+  display: flex; gap: 6px 16px; flex-wrap: wrap; align-items: baseline;
+  margin: 6px 0; font-size: 12.5px; color: var(--ink-2);
+}
+.ocard-facts .lbl { font-weight: 600; color: var(--muted); }
+.ocard-sig {
+  background: var(--warn-soft); border: 1px solid #f0d6ab; color: #7c4a09;
+  border-radius: 999px; padding: 1px 9px; font-size: 12px;
+}
+.ocard-ai {
+  border: 1px dashed var(--line); border-radius: 8px;
+  padding: 9px 12px; margin: 10px 0; background: #fcfdfd;
+}
+.ocard-ai-row { display: flex; gap: 12px; font-size: 13px; margin: 3px 0; }
+.ocard-ai-row .lbl { flex: 0 0 72px; text-align: right; color: var(--muted); }
+#dw-card { margin-bottom: 4px; }

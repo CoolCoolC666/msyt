@@ -166,9 +166,13 @@ async function runAiBatch() {
   }
 }
 
-/** 轮询后台任务，把逐条进度回显出来 */
-async function pollAiJob(jid) {
-  const st = document.getElementById('anno-ai-state');
+/* ---------- 通用：轮询后台任务，把逐条进度回显出来 ----------
+   ★ AI 初注与舆情卡片共用它（两个 job 机制一样，只是日志框与收尾话术不同）。
+     抽出来是为了**不写两份轮询** —— 两份轮询迟早会跑偏。 */
+async function pollJob(jid, opts) {
+  const o = opts || {};
+  const view = o.view || null;
+  const stateEl = o.stateEl || null;
   for (;;) {
     const j = await api('/api/jobs/' + encodeURIComponent(jid) + '?tail=200');
     const lines = (j.logs || []).map(function (x) {
@@ -177,23 +181,37 @@ async function pollAiJob(jid) {
         + '<span class="m">' + esc(x.m || '') + '</span></div>';
     });
     const head = j.last_progress ? '<b>' + esc(j.last_progress) + '</b>' : '';
-    if (logAi) logAi.set(lines, head);
-    if (st && j.state === 'running') st.textContent = j.last_progress || '运行中…';
+    if (view) view.set(lines, head);
+    if (stateEl && j.state === 'running') stateEl.textContent = j.last_progress || '运行中…';
     if (j.state !== 'running') {
       const res = j.result || {};
-      const msg = 'AI 初注结束：成功 ' + (res.ok || 0) + ' 条'
-        + (res.failed ? '，失败 ' + res.failed + ' 条' : '')
-        + (res.stopped ? '（已停手：' + res.stopped + '）' : '')
-        + (j.state === 'failed' ? '（任务出错：' + (j.error || '') + '）' : '');
+      const msg = o.doneMsg ? o.doneMsg(res, j)
+        : ('任务结束：' + (j.state || ''));
       toast(msg);
-      if (st) st.textContent = msg;
-      const btn = document.getElementById('anno-ai-stop');
+      if (stateEl) stateEl.textContent = msg;
+      const btn = o.stopBtn ? document.getElementById(o.stopBtn) : null;
       if (btn) btn.classList.add('hidden');
-      await loadAnnoQueue();
-      return;
+      if (o.onDone) await o.onDone(res, j);
+      return res;
     }
     await new Promise(function (r) { setTimeout(r, 1500); });
   }
+}
+
+/** AI 初注那一轮的轮询（话术是 AI 初注专用的） */
+async function pollAiJob(jid) {
+  return pollJob(jid, {
+    view: logAi,
+    stateEl: document.getElementById('anno-ai-state'),
+    stopBtn: 'anno-ai-stop',
+    doneMsg: function (res, j) {
+      return 'AI 初注结束：成功 ' + (res.ok || 0) + ' 条'
+        + (res.failed ? '，失败 ' + res.failed + ' 条' : '')
+        + (res.stopped ? '（已停手：' + res.stopped + '）' : '')
+        + (j.state === 'failed' ? '（任务出错：' + (j.error || '') + '）' : '');
+    },
+    onDone: function () { return loadAnnoQueue(); },
+  });
 }
 
 /** 进标注台时：接上**还在跑**的 AI 初注任务。
