@@ -258,6 +258,19 @@ def _cfg() -> Config:
     return cfg
 
 
+def _auth_enabled() -> bool:
+    """**账号系统开关**（config.json 里 `auth_enabled: false` → 全站免登录）。
+
+    ★ 为什么做成开关，而不是把账号系统删掉：
+      服务器端（公网）**必须**开着 —— 那是多人协作，权限是核心；
+      但「分发到组员本地玩」的版本**不需要**账号 —— 每人拷一份自己跑，
+      没有共享成员表，也就没有共享凭据。删代码会让服务器端回不了头。
+    ★ 默认**开**：config.json 里没这一项 → 走原来的登录流程，一行都不变。
+    ★ 免登录时所有请求都按**管理员**处理 —— 本地单机使用，没有权限边界要守。
+    """
+    return bool((_cfg().extra or {}).get("auth_enabled", True))
+
+
 # ====================================================================== 任务
 class Job:
     """一个后台采集任务。
@@ -2268,6 +2281,10 @@ def ensure_admin(cfg: Config) -> str:
     """首次启动时建管理员账号。返回 JWT 密钥。"""
     db = get_db(cfg)
     sec = _secret(cfg)
+    # ★ 账号系统关掉时（本地分发版）：**不建账号**，也不写 admin-账号.txt ——
+    #   「不要账号系统」就要彻底：库里不留凭据、磁盘上不留口令文件。
+    if not _auth_enabled():
+        return sec
     admin_email = str((cfg.extra or {}).get("admin_email")
                       or "admin@example.com").strip().lower()
     with db.lock:
@@ -2311,6 +2328,12 @@ def require_auth(request: Request, query_token: str = "") -> Dict[str, Any]:
     只在流式端点开这个口子，其他端点仍只认 Authorization 头。
     """
     cfg = _cfg()
+    # ★ 账号系统关掉时（本地分发版）：不校验令牌，直接当**管理员**。
+    #   本机单机使用，没有多用户边界要守；关掉账号系统省掉「先注册再登录」。
+    if not _auth_enabled():
+        return {"email": "local@msyt.local", "role": "admin",
+                "node_id": "admin", "status": "active", "quota": 0,
+                "note": "本地模式（账号系统已关闭）"}
     tok = ""
     h = request.headers.get("Authorization") or ""
     if h.startswith("Bearer "):
@@ -2471,6 +2494,8 @@ def api_auth_config() -> Dict[str, Any]:
     return {
         "admin_email": str((cfg.extra or {}).get("admin_email")
                            or "admin@example.com"),
+        # ★ 前端据此决定：要不要弹登录框。关掉账号系统 → 直接进主界面。
+        "auth_enabled": _auth_enabled(),
         "allow_register": True,
         "auto_approve": bool((cfg.extra or {}).get("auto_approve_registration")),
         "allow_domains": str((cfg.extra or {}).get("allow_domains") or ""),

@@ -34,6 +34,7 @@ const state = {
   lastQ: '',
   token: loadToken(),
   me: null,
+  authEnabled: true,      // 账号系统是否开着（后端 config 说了算）
   es: null,
   esSeq: 0,
 };
@@ -2134,6 +2135,15 @@ $('#reg-form').onsubmit = async (ev) => {
 (async () => {
   try {
     const c = await api('/api/auth/config');
+    // ★ 账号系统被关掉（本地分发版）→ 不弹登录框，直接进主界面。
+    if (c && c.auth_enabled === false) {
+      state.authEnabled = false;
+      state.token = '';
+      state.me = { email: 'local', role: 'admin', node_id: 'admin' };
+      hideLogin();
+      await afterLogin();
+      return;
+    }
     $('#lg-tip').innerHTML =
       `管理员账号：<code>${esc(c.admin_email)}</code>`
       + (c.allow_domains ? `　（允许域名：${esc(c.allow_domains)}）` : '');
@@ -2191,8 +2201,15 @@ async function afterLogin() {
     const visible = isAdmin || TABS_FOR_MEMBER.includes(tab);
     b.style.display = visible ? '' : 'none';
   });
-  $('#btn-pw-top').classList.remove('hidden');
-  $('#btn-logout-top').classList.remove('hidden');
+  // ★ 账号系统关掉时：**不显示**「改密码 / 退出登录」—— 没有账号可改、
+  //   退出后也登不回来（会把自己锁在门外）。
+  if (state.authEnabled === false) {
+    $('#btn-pw-top').classList.add('hidden');
+    $('#btn-logout-top').classList.add('hidden');
+  } else {
+    $('#btn-pw-top').classList.remove('hidden');
+    $('#btn-logout-top').classList.remove('hidden');
+  }
   $('#assist-admin').style.display = isAdmin ? '' : 'none';
   $('#assist-member').style.display = isAdmin ? 'none' : '';
   $('#members-card').style.display = isAdmin ? '' : 'none';
@@ -3477,6 +3494,8 @@ $('#stream-log').dataset.empty = '1';
 
 // 恢复登录态（localStorage 里的 token）；没有就弹登录框
 (async () => {
+  // ★ 账号系统关掉时，上面那段已经直接进主界面了，这里就别再弹登录框。
+  if (state.me) { return; }
   if (!state.token) { showLogin(); return; }
   try {
     state.me = await api('/api/auth/me');
