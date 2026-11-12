@@ -237,6 +237,30 @@
 
   <!-- ---------- 子页：采集作业 ---------- -->
   <div class="subpanel" id="sub-jobs">
+    <!-- ---------- 一键增量（管理员端第一栏） ---------- -->
+    <div class="card" id="inc-card" style="display:none">
+      <h3>⚡ 一键增量（分类体系 + 列表全选 + 详情全选）</h3>
+      <p class="hint">
+        一个按钮把三件事**按顺序**做完：<b>① 刷分类体系</b>（部门目录 + 区县市 + 站方统计）
+        → <b>② 列表采集</b>（全部部门 + 全站视图，从上次水位线<b>接着采</b>，不从头重来）
+        → <b>③ 详情采集</b>（把还没采到正文的帖跑完，先旧后新）。
+        三步在**同一个任务**里串行跑，中途可随时「停止」，进度落库、可续。
+      </p>
+      <div class="row">
+        <label class="lbl">每源最多</label>
+        <input id="inc-pages" type="number" value="500" min="0" style="width:90px"
+               title="每源最多几页（0=不限，站方分页顶 500）">
+        <span class="dim">页</span>
+        <label class="lbl">详情本次最多</label>
+        <input id="inc-limit" type="number" value="0" min="0" style="width:90px"
+               title="详情本次最多几帖（0=不限）">
+        <span class="dim">帖（0=不限）</span>
+        <button class="primary" id="btn-increment">一键增量</button>
+        <span class="hint" id="inc-msg"></span>
+      </div>
+      <div class="hint" id="inc-estimate">正在统计工作量…</div>
+    </div>
+
     <div class="card" id="agent-first-card">
       <h3>⚠ 开始采集前，先在你自己的电脑上启动 Agent</h3>
       <div class="warnbox">

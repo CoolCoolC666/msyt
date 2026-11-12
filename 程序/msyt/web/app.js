@@ -225,7 +225,7 @@ function showSub(sub) {
   const el = $('#sub-' + target);
   if (el) el.classList.remove('hidden');
   if (target === 'jobs') {
-    ensurePickers(); loadJobs();
+    ensurePickers(); loadJobs(); updateIncEstimate();
     // ★ 「采集作业」页顶上就是本机 agent 面板 + 「先起 Agent」引导卡，
     //   所以进这个页签也要开始轮询助手（否则状态徽章不更新）。
     pollHelper();
@@ -1415,6 +1415,63 @@ $('#j-limit').oninput = () => {
   const P = pickers.find(x => x.root.id === 'picker-detail');
   if (P) updateDetailEstimate(P);
 };
+/* ---------------- 一键增量（管理员端第一栏） ----------------
+   ★ 一个按钮把三件事按顺序做完：分类体系 → 列表采集（全选）→ 详情采集（跑队列）。
+   ★ 跑在服务器上 = 管理员自己的节点（成员那边走本机 agent，不在这里）。
+   ★ 「额度可能不够」→ 点之前先看工作量；详情阶段可以设上限，少跑一点。 */
+async function updateIncEstimate() {
+  const el = $('#inc-estimate');
+  if (!el) return;
+  try {
+    const r = await api('/api/pending?dept_ids=');
+    const nDept = (deptDict.depts || []).length;
+    const lim = +$('#inc-limit').value || 0;
+    el.textContent = '将走 ' + nDept + ' 个部门 + 全站视图；库内还有 '
+      + num(r.total_pending) + ' 帖没采到正文'
+      + (lim > 0 ? '，本次最多采 ' + num(lim) + ' 帖' : '，本次全采')
+      + '。列表 1 请求/页，详情每帖 N×2 次请求（N=页数）；站方按 IP 限流，'
+      + '额度有限时把「详情本次最多」调小。';
+  } catch (e) {
+    el.textContent = '（工作量统计失败：' + e.message + '）';
+  }
+}
+
+$('#btn-increment').onclick = async () => {
+  const pages = +$('#inc-pages').value || 0;
+  const lim = +$('#inc-limit').value || 0;
+  const msg = $('#inc-msg');
+  try {
+    const r = await api('/api/pending?dept_ids=');
+    const nDept = (deptDict.depts || []).length;
+    const cap = pages > 0 ? pages : 500;
+    const maxReq = (nDept + 1) * cap;
+    const h = (maxReq * 1.0 / 3600).toFixed(1);
+    if (!confirm('一键增量（在这台服务器上跑）：\n'
+      + '· 分类体系：刷部门目录 + 区县市 + 站方统计\n'
+      + '· 列表采集：' + nDept + ' 个部门 + 全站视图，每源最多 ' + cap + ' 页'
+      + '（最坏约 ' + num(maxReq) + ' 次请求，按 1 秒/次约 ' + h + ' 小时）\n'
+      + '· 详情采集：把还没采到正文的帖跑一遍'
+      + (lim > 0 ? '，本次最多 ' + num(lim) + ' 帖' : '（本次全采，可能很久）')
+      + '\n\n站方按 IP 限流，跑起来很慢；中途可随时「停止」，进度会落库、可续。\n继续？')) return;
+    if (msg) msg.textContent = '正在启动…';
+    const r2 = await api('/api/jobs/increment', {
+      method: 'POST',
+      body: JSON.stringify({ pages: pages, detail_limit: lim }),
+    });
+    const jid = (r2.job || {}).id || '';
+    toast('一键增量已开始：' + jid);
+    state.selJob = jid;
+    loadJobs();
+    pollJobs();
+    if (msg) msg.textContent = '已启动（任务 ' + jid + '），进度见下面「任务运行情况」';
+  } catch (e) {
+    toast('一键增量启动失败：' + e.message, true);
+    if (msg) msg.textContent = e.message;
+  }
+};
+$('#inc-pages').oninput = updateIncEstimate;
+$('#inc-limit').oninput = updateIncEstimate;
+
 $('#btn-export').onclick = async () => {
   try {
     const r = await api('/api/export', {
@@ -1426,7 +1483,8 @@ $('#btn-export').onclick = async () => {
   } catch (e) { toast('导出失败：' + e.message, true); }
 };
 
-const KIND_CN = { taxonomy: '分类体系', list: '列表采集', detail: '详情采集' };
+const KIND_CN = { taxonomy: '分类体系', list: '列表采集', detail: '详情采集',
+  increment: '一键增量' };
 
 async function loadJobs() {
   const r = await api('/api/jobs');
@@ -1448,7 +1506,9 @@ async function loadJobs() {
       ? `源 ${j.params.sources}｜最多 ${j.params.pages || '不限'} 页`
       : j.kind === 'detail'
         ? `最多 ${j.params.limit || '不限'} 帖${j.params.tids?.length ? '｜定点 ' + j.params.tids.join(',') : ''}`
-        : '部门目录 + 区县市 + 站方统计';
+        : j.kind === 'increment'
+          ? `分类体系 + 列表全选 + 详情全选｜每源 ${j.params.list?.pages || '不限'} 页`
+          : '部门目录 + 区县市 + 站方统计';
     return `<div class="job ${state.selJob === j.id ? 'sel' : ''}" data-jid="${j.id}">
       <span class="kind">${esc(KIND_CN[j.kind] || j.kind)}</span>
       <span class="badge ${st}">${esc(j.state)}</span>
@@ -2141,6 +2201,9 @@ async function afterLogin() {
   //   流量全来自管理员那一个 IP）。所以成员的「开始采集」改为**转交本机 agent**，
   //   「分类体系抓取」是权威库的基础设施 → 管理员专属。
   $('#btn-taxonomy').style.display = isAdmin ? '' : 'none';
+  // ★ 「一键增量」= 服务器端采集 → 管理员专属（成员在服务器上采，
+  //   站方看到的流量全来自管理员那一个 IP，协作采集就失去意义了）。
+  $('#inc-card').style.display = isAdmin ? '' : 'none';
   // ★ 「先起 Agent」引导卡：**只给成员看**（2026-10-23 用户要求）。
   //   管理员在服务器上采（服务器就是自己的机器），不需要这层提醒；
   //   成员必须在自己的电脑上起 agent，所以这张卡要摆在「采集作业」最前面。

@@ -435,8 +435,10 @@ def _job_taxonomy(cfg: Config, job: Job) -> Dict[str, Any]:
             "recomputed": n}
 
 
-def _job_list(cfg: Config, job: Job) -> Dict[str, Any]:
-    p = job.params
+def _job_list(cfg: Config, job: Job, p=None) -> Dict[str, Any]:
+    # ★ p 允许外部传入：一键增量把「列表段」和「详情段」的参数放同一个 job 里，
+    #   两段的 dept_ids 含义不同（采集源 vs 挑待采详情），不能共用一份。
+    p = job.params if p is None else p
     db = get_db(cfg)
     client = _JobClient(cfg, job)
     depts = [dict(r) for r in db.conn.execute(
@@ -490,8 +492,8 @@ def _job_list(cfg: Config, job: Job) -> Dict[str, Any]:
             "cutoff": cutoff, "enqueued": q, "skipped": sk}
 
 
-def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
-    p = job.params
+def _job_detail(cfg: Config, job: Job, p=None) -> Dict[str, Any]:
+    p = job.params if p is None else p
     db = get_db(cfg)
     client = _JobClient(cfg, job)
     if p.get("retry_failed"):
@@ -546,6 +548,27 @@ def _job_detail(cfg: Config, job: Job) -> Dict[str, Any]:
     return res
 
 
+def _job_increment(cfg: Config, job: Job) -> Dict[str, Any]:
+    """一键增量：**分类体系 → 列表采集（全选）→ 详情采集（跑队列）**，三步串行。
+
+    ★ 为什么要串行而不是并行：列表采集**结束时**才把「还没采详情的帖」入队；
+      并行跑的话，详情段会漏掉这一轮新入队的帖 → 增量就白跑了。
+    ★ 中途可随时「停止」：停止后已完成的部分**留在库里**，下次接着跑。
+    """
+    p = job.params
+    list_p = dict(p.get("list") or {})
+    detail_p = dict(p.get("detail") or {})
+    job.log("阶段 1/3：分类体系 + 列表采集（全选 %d 个部门 + 全站视图，从水位线续采）"
+             % len(list_p.get("dept_ids") or []))
+    r1 = _job_list(cfg, job, list_p)
+    if job.should_stop():
+        job.log("收到停止指令 → 详情采集不跑了（已采到的都留在库里）")
+        return {"list": r1, "detail": {"skipped": "已停止"}}
+    job.log("阶段 2/3：详情采集（把队列里的待采帖全跑完，先旧后新）")
+    r2 = _job_detail(cfg, job, detail_p)
+    return {"list": r1, "detail": r2}
+
+
 # ====================================================================== 请求体
 def _reject_if_running(kind: str, node: str) -> None:
     """同节点同类任务已在跑 → 拒绝再起一个。
@@ -579,6 +602,37 @@ class ListReq(BaseModel):
     restart: bool = False
     taxonomy: bool = False
     #: 采集节点标识。同节点的任务互斥；不同节点可并行（小组成员协作的 Beta 预留）
+    node: str = "admin"
+
+
+def increment_params(db, pages: int = 500, detail_limit: int = 0) -> Dict[str, Any]:
+    """一键增量的**两段参数**（列表段 / 详情段）。
+
+    ★ 为什么抽成函数：一键增量是「点一下做完三件事」，口径必须**能单独断言**
+      —— 闸直接调它检查「增量 = 续采不重采」「详情 = 跑队列」这些关键点。
+
+    列表段：全部部门 + 全站视图 + **先刷分类体系** + **从水位线续采**（restart=False
+      —— 这就是「增量」：不从头重采，只接着上次断点往后采）。
+    详情段：**跑队列**（dept_ids 为空）—— 列表采集结束时才把待采详情入队，
+      跑队列正好是「还没采正文的全做」，而且自动跳过站方限制的帖（永远采不到）。
+    """
+    dept_ids = [int(r["typeid"]) for r in db.conn.execute("SELECT typeid FROM depts")]
+    return {
+        "list": {"sources": "", "dept_ids": dept_ids, "use_global": True,
+                 "pages": int(pages or 0), "stop_after": 0, "restart": False,
+                 "taxonomy": True},
+        "detail": {"limit": int(detail_limit or 0), "max_attempts": 3,
+                   "retry_failed": True, "tids": [], "dept_ids": []},
+        "dept_count": len(dept_ids),
+    }
+
+
+class IncrementReq(BaseModel):
+    #: 每源最多几页（0 = 不限，站方分页顶 500）
+    pages: int = 500
+    #: 详情本次最多几帖（0 = 不限）
+    detail_limit: int = 0
+    #: 采集节点标识（同节点互斥）
     node: str = "admin"
 
 
@@ -1454,6 +1508,32 @@ def api_job_detail(request: Request, req: DetailReq = Body(...)) -> Dict[str, An
     _reject_if_running("detail", node)
     job = JOBS.create("detail", req.model_dump(), node=node)
     JOBS.spawn(job, lambda j: _job_detail(cfg, j))
+    return {"job": job.to_dict(tail=0)}
+
+
+@app.post("/api/jobs/increment")
+def api_job_increment(request: Request, req: IncrementReq = Body(...)) -> Dict[str, Any]:
+    """一键增量：一个按钮把**分类体系 + 列表采集全选 + 详情采集全选**一次做完。
+
+    ★ 管理员专属（服务器端采集）。
+    ★ 与现有采集任务**互斥**：同节点已经在跑列表/详情就别再起 —— 两个任务会
+      重复请求同一批页、互相踩水位线（这条坑实测踩过）。
+    ★ 只建任务、不采集；采集真的发生时是「按站方节奏打」的，急不来。
+    """
+    m = _require_admin_jobs(request)
+    cfg = _cfg()
+    node = _job_node(m, req.node)
+    req.node = node
+    _reject_if_running("list", node)
+    _reject_if_running("detail", node)
+    _reject_if_running("increment", node)
+    db = get_db(cfg)
+    ps = increment_params(db, req.pages, req.detail_limit)
+    job = JOBS.create("increment",
+                       {"list": ps["list"], "detail": ps["detail"], "node": node,
+                        "dept_count": ps["dept_count"]},
+                       node=node)
+    JOBS.spawn(job, lambda j: _job_increment(cfg, j))
     return {"job": job.to_dict(tail=0)}
 
 
