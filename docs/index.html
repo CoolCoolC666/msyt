@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>msyt · 民生e点通舆情采集器</title>
+<meta name="description" content="教学用的地方论坛舆情采集与协作分析系统：只读采集、双链路落库、本地 Web 检索与完整性体检。">
+<style>
+:root{
+  --bg:#fbfaf7; --fg:#1f2328; --muted:#6a737d; --line:#e6e1d8;
+  --accent:#2f6f4f; --accent-soft:#eaf2ed; --card:#fff;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#14161a; --fg:#e8e6e1; --muted:#9aa3ad; --line:#2a2f36;
+         --accent:#7fbf9b; --accent-soft:#1b2a22; --card:#1a1d22; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.75 -apple-system,"Segoe UI","Noto Sans SC","PingFang SC",sans-serif;}
+.wrap{max-width:860px;margin:0 auto;padding:64px 24px 96px}
+.eyebrow{letter-spacing:.18em;font-size:12px;color:var(--muted);text-transform:uppercase}
+h1{font-size:clamp(30px,5vw,46px);line-height:1.25;margin:12px 0 14px;font-weight:700}
+.lede{color:var(--muted);font-size:17px;max-width:44em}
+.rule{height:1px;background:var(--line);margin:36px 0}
+h2{font-size:20px;margin:40px 0 14px;font-weight:650}
+h3{font-size:16px;margin:22px 0 8px;font-weight:600}
+p{margin:10px 0}
+ul,ol{margin:10px 0 10px 1.3em}
+li{margin:6px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:18px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:18px 0}
+.cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.cell b{display:block;font-size:14px;margin-bottom:4px}
+.cell span{color:var(--muted);font-size:14px}
+code,pre{font-family:ui-monospace,"Cascadia Code",Consolas,monospace}
+pre{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:16px 18px;overflow:auto;font-size:13.5px;line-height:1.6}
+.tag{display:inline-block;background:var(--accent-soft);color:var(--accent);
+  border-radius:999px;padding:2px 10px;font-size:12px;margin:0 6px 6px 0}
+.note{border-left:3px solid var(--accent);padding:10px 0 10px 14px;color:var(--muted)}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:13px}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+a:hover{border-bottom-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">教学项目 · 只读采集 · MIT</div>
+  <h1>msyt —— 民生e点通「群众留言板」<br>舆情采集与协作分析</h1>
+  <p class="lede">面向中国宁波网「民生e点通 · 天一论坛」群众留言板（fid=1176）的只读采集器。
+  列表与详情双链路落库，本地 Web 界面做检索、完整性体检与导出；可选的多机协作让成员各自采集、回传并入权威库。</p>
+
+  <p>
+    <span class="tag">Python</span><span class="tag">SQLite + FTS5</span>
+    <span class="tag">FastAPI</span><span class="tag">只读 GET</span>
+    <span class="tag">多机协作</span>
+  </p>
+
+  <div class="rule"></div>
+
+  <h2>它解决什么问题</h2>
+  <div class="grid">
+    <div class="cell"><b>双链路，分开计价</b><span>列表 1 次请求拿元数据；详情 N×2 次请求拿楼层正文与受理时间线。</span></div>
+    <div class="cell"><b>完整性有硬判据</b><span>头楼、尾楼、页数与正文缺一不可；软警告单列，不与漏采混为一谈。</span></div>
+    <div class="cell"><b>增量分两级</b><span>新帖按 tid 去重；老帖靠回复数变大识别「站方追加了回复」。</span></div>
+    <div class="cell"><b>可追溯</b><span>每条记录保留 url 与 tid，任何结论都能回源复核。</span></div>
+  </div>
+
+  <h2>三条踩出来的规矩</h2>
+  <div class="card">
+    <ol>
+      <li><b>取 token 与用 token 之间不得插入 sleep 或重试。</b>正文由异步接口注入，token 时效不足 30 秒。</li>
+      <li><b>tid 不参与内容选择，token 才是钥匙。</b>用错 tid 服务端仍返回同一正文且不报错——必须用响应自带的 pid 锚点做集合校验。</li>
+      <li><b>页码不能当水位。</b>列表随时间漂移，增量要按 tid 与回复数签名判断。</li>
+    </ol>
+  </div>
+
+  <h2>三十秒跑起来</h2>
+<pre>cd 程序
+pip install -e .
+python -m msyt doctor
+python -m msyt taxonomy
+python -m msyt list --sources global --pages 5
+python -m msyt detail --limit 50
+python -m msyt web        # → http://127.0.0.1:8765/</pre>
+
+  <h2>界面里有什么</h2>
+  <ul>
+    <li><b>总览</b>：类别、受理状态、部门分组、时效灯、区县市分布，以及「结论边界」卡。</li>
+    <li><b>检索与浏览</b>：FTS5 + trigram，任意标签轴切片；详情抽屉含舆情卡片。</li>
+    <li><b>采集与协作</b>：一键增量、任务发布、成员领活与回传。</li>
+    <li><b>完整性体检</b>：硬问题 / 软警告 / 已识别的增量分列，可批量重跑或清除。</li>
+    <li><b>标注台</b>：批次视图、领活、快捷键流、人工与规则一致性反馈。</li>
+  </ul>
+
+  <h2>多机协作</h2>
+  <p>站方不给 CORS 头，浏览器里采不到正文；正文必须由运行在采集者自己电脑上的 agent 发请求，
+  站方看到的是分散的普通用户，而不是一台服务器在集中爬。成员端不需要装这个包：
+  网站实时生成启动包，包里没有密码，只有一张绑定账号的限时票据。</p>
+  <p class="note">公网入口按你的部署而定；文档与示例统一用 <code>msyt.example.com</code> 占位，仓库里不含真实地址。</p>
+
+  <h2>合规与边界</h2>
+  <ul>
+    <li>只做只读：不注册账号、不做短信认证、不发帖／回复／点赞／收藏。</li>
+    <li>站内明示栏目内容未经授权不得擅自使用或转载；本项目定位教学与课程分析，只采不转载、不商用。</li>
+    <li>留言含昵称、uid、IP 属地等个人信息：分析与展示时脱敏或聚合，原始记录只留本地库。</li>
+    <li>MIT 只覆盖代码，<b>不覆盖站方数据</b>。</li>
+  </ul>
+
+  <h2>仓库导航</h2>
+  <ul>
+    <li><a href="https://github.com/CoolCoolC666/msyt">源代码仓库</a>（README 有完整方案与踩坑记录）</li>
+    <li><code>_报告/方案报告.md</code>：约 50 节，每条结论都带实测证据</li>
+    <li><code>_报告/分布式抓取协作方案.md</code>：多机协作的设计与实现</li>
+    <li><code>_tools/test_*.py</code>：可独立运行的回归闸（CI 每次 push 都跑离线子集）</li>
+  </ul>
+
+  <footer>
+    msyt · 教学项目 · 代码 MIT · 数据权利归站方与原作者
+  </footer>
+</div>
+</body>
+</html>

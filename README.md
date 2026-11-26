@@ -1,6 +1,7 @@
 # msyt —— 民生e网通「群众留言板」舆情采集与协作分析
 
 > 课程作业 **02 民生e网通** · 独立项目 · **公开仓库**
+> 文档站：<https://coolcoolc666.github.io/msyt/>（仓库内 `docs/`，push 自动发布）
 > 目标站点：中国宁波网 民生e点通 · 天一论坛 › **群众留言板**（`fid=1176`）
 > 目标地址：`https://bbs.cnnb.com.cn/forum.php?mod=forumdisplay&fid=1176`
 
