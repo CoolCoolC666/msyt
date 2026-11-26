@@ -93,6 +93,19 @@ function Write-Endpoints($urls) {
   if ($clean.Count -eq 0) { return }
   $now = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 
+  # ★ 2026-11-26（接管）：命名隧道的 agentapi 是**固定入口**，
+  #   不能因为 quick tunnel 重启就被整个覆盖 —— 否则成员链路立刻回到
+  #   「403 / 死地址」。这里把 agentapi 永远排在最前面兜底。
+  $stable = ''
+  $domFile = Join-Path $dataDir 'tunnel-domain.txt'
+  if (Test-Path $domFile) {
+    $dom = (Get-Content -Path $domFile -Raw).Trim().TrimEnd('/')
+    if ($dom -and -not $dom.StartsWith('agentapi.')) {
+      $stable = 'https://agentapi.' + $dom
+    }
+  }
+  if ($stable -and ($clean -notcontains $stable)) { $clean = @($stable) + $clean }
+
   # ① 服务端认的主地址（会被盖进 agent 票据 / 下载页）
   $clean[0] | Set-Content -Path $apiBaseFile -Encoding UTF8
 
@@ -100,8 +113,12 @@ function Write-Endpoints($urls) {
   $obj = [ordered]@{
     endpoints   = @($clean)
     updated_at  = $now
-    source      = 'cloudflared quick tunnel'
-    note        = 'quick tunnel 每次重启地址会变；组员重启 agent 即可重新选址'
+    source      = $(if ($stable) { 'named tunnel + quick tunnel' } else { 'cloudflared quick tunnel' })
+    note        = $(if ($stable) {
+        'agentapi 是固定入口（命名隧道），常驻；quick tunnel 仅作备用，重启会变'
+      } else {
+        'quick tunnel 每次重启地址会变；组员重启 agent 即可重新选址'
+      })
   }
   ($obj | ConvertTo-Json -Depth 4) | Set-Content -Path $endpointsFile -Encoding UTF8
 
