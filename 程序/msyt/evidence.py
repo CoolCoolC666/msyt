@@ -453,6 +453,86 @@ def sign_run_env(db, case_id: str, operator: str = "", device: str = "",
     return {"case_id": case_id, "signed": signed}
 
 
+def _insert_disposition(db, case_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """写一条处置台账并入链（kind=dispose，payload=该行内容的规范化哈希）。"""
+    with db.lock:
+        cur = db.conn.execute(
+            "INSERT INTO dispositions(case_id,at,actor,action,channel,ticket_no,"
+            "result,note) VALUES(?,?,?,?,?,?,?,?)",
+            (case_id, row["at"], row.get("actor", ""), row.get("action", ""),
+             row.get("channel", ""), row.get("ticket_no", ""), row.get("result", ""),
+             row.get("note", "")))
+        db.conn.commit()
+    rec = dict(row, case_id=case_id)
+    ev = Chain(db.conn).append("dispose", "dispositions", str(cur.lastrowid),
+                               sha256_bytes(canon(rec).encode("utf-8")))
+    return {"id": cur.lastrowid, "seq": ev["seq"], "at": row["at"],
+            "action": row.get("action", ""), "payload_sha256": ev["payload_sha256"]}
+
+
+def sync_dispositions(db, case_id: str,
+                      actor: str = "站方流程（自动同步）",
+                      channel: str = "bbs.cnnb.com.cn 群众留言板") -> Dict[str, Any]:
+    """把**站方流程**（flows 表：已发帖/已分类/已受理/预回复/已回复）落成处置台账。
+
+    ★ 只搬事实，不做解释：
+      - `state` / `light`（如「3个工作日内回复」）原样写进 result；
+      - 同 (case_id, at, note) 已存在则跳过 → 可重复跑；
+      - 「站方已回复」**不等于**舆情处置完毕，内部动作仍要人补（case log）。
+    """
+    items = _rows(db.conn, "SELECT * FROM case_items WHERE case_id=? ORDER BY tid",
+                  (case_id,))
+    if not items:
+        raise KeyError("案件 %s 还没有条目" % case_id)
+    added: List[Dict[str, Any]] = []
+    skipped = 0
+    for it in items:
+        tid = int(it["tid"])
+        th = db.conn.execute("SELECT state FROM threads WHERE tid=?", (tid,)).fetchone()
+        state = (th["state"] if th else "") or ""
+        light = ""
+        for tag in _rows(db.conn, "SELECT code,name FROM thread_tags WHERE tid=? AND dim='light'",
+                         (tid,)):
+            light = (tag.get("name") or tag.get("code") or "")
+        flows = _rows(db.conn, "SELECT step,name,time FROM flows WHERE tid=? ORDER BY step",
+                      (tid,))
+        reply = "已回复" if state == "已回复" else "未回复"
+        last_step = flows[-1]["step"] if flows else None
+        for f in flows:
+            note = "tid=%s step=%s｜state=%s%s" % (
+                tid, f["step"], state, ("｜" + light) if light else "")
+            result = (("回复状态：%s（同步时快照）" % reply)
+                      if f["step"] == last_step else "流程节点")
+            dup = db.conn.execute(
+                "SELECT id FROM dispositions WHERE case_id=? AND at=? AND note=?",
+                (case_id, f["time"], note)).fetchone()
+            if dup:
+                skipped += 1
+                continue
+            added.append(_insert_disposition(db, case_id, {
+                "at": f["time"], "actor": actor,
+                "action": "站方流程：%s" % (f["name"] or ""),
+                "channel": channel, "ticket_no": "", "result": result,
+                "note": note}))
+    return {"case_id": case_id, "added": added, "skipped": skipped}
+
+
+def add_disposition(db, case_id: str, action: str, actor: str = "",
+                    channel: str = "", ticket_no: str = "", result: str = "",
+                    note: str = "", at: str = "") -> Dict[str, Any]:
+    """人工补录一条处置动作（投诉工单 / 平台回执 / 对外回应 / 复盘…）。"""
+    if not action.strip():
+        raise ValueError("action 不能为空（发现/告警/上报/核查/投诉/删帖/限流/回应/复盘…）")
+    return _insert_disposition(db, case_id, {
+        "at": at or now_str(), "actor": actor, "action": action, "channel": channel,
+        "ticket_no": ticket_no, "result": result, "note": note})
+
+
+def list_dispositions(db, case_id: str) -> List[Dict[str, Any]]:
+    return _rows(db.conn, "SELECT * FROM dispositions WHERE case_id=? ORDER BY at, id",
+                 (case_id,))
+
+
 def _rows(conn, sql: str, args: tuple = ()) -> List[Dict[str, Any]]:
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
@@ -537,6 +617,11 @@ def export_case(db, case_id: str, out_dir: str = "",
         if r["run_id"] and os.path.exists(p):
             with open(p, "rb") as f:
                 files["env/%s.json" % r["run_id"]] = f.read()
+
+    # 处置台账（站方流程自动同步 + 人工补录）
+    dispos = list_dispositions(db, case_id)
+    files["content/dispositions.json"] = json.dumps(
+        dispos, ensure_ascii=False, indent=1).encode("utf-8")
 
     # 全文（便于人读；不作为原件，原件是 posts.json）
     for th in threads:
@@ -628,7 +713,7 @@ def export_case(db, case_id: str, out_dir: str = "",
     files["manifest.sha256"] = (sha256_bytes(man_bytes) + "  manifest.json\n").encode("utf-8")
 
     # ---- 笔录模板 ----
-    files["custody.md"] = _custody_md(case, items, operator, runs).encode("utf-8")
+    files["custody.md"] = _custody_md(case, items, operator, runs, dispos).encode("utf-8")
     files["README.txt"] = _readme_txt(bundle_id).encode("utf-8")
     files["verify.py"] = _verify_src().encode("utf-8")
 
@@ -790,9 +875,24 @@ bundle: %s
 
 
 def _custody_md(case: Dict[str, Any], items: List[Dict[str, Any]],
-                operator: str, runs: Optional[List[Dict[str, Any]]] = None) -> str:
+                operator: str, runs: Optional[List[Dict[str, Any]]] = None,
+                dispos: Optional[List[Dict[str, Any]]] = None) -> str:
     rows = "\n".join("| %s | %s | %s |" % (i["tid"], i.get("role") or "", i.get("note") or "")
                      for i in items)
+    dispos = dispos or []
+    if dispos:
+        body = "\n".join(
+            "| %s | %s | %s | %s | %s |" % (
+                d.get("at") or "", d.get("action") or "",
+                (d.get("channel") or "") + ("（工单 %s）" % d["ticket_no"]
+                                            if d.get("ticket_no") else ""),
+                d.get("result") or "",
+                (d.get("note") or "").replace("|", "／"))
+            for d in dispos)
+        disp_tbl = ("| 时间 | 动作 | 渠道/工单 | 结果 | 备注 |\n"
+                    "|---|---|---|---|---|\n" + body)
+    else:
+        disp_tbl = "（无记录）"
     runs = runs or []
     signed = [r for r in runs if (r.get("operator") or "").strip()]
     r0 = signed[0] if signed else {}
@@ -855,17 +955,23 @@ def _custody_md(case: Dict[str, Any], items: List[Dict[str, Any]],
 ## 五、无法获取的内容及原因（★ 有就写，没有写"无"）
 - ★ __________（例：该帖为站方 restricted，仅作者本人可见，页面返回提示页，非我方遗漏）
 
-## 六、校验结果
+## 六、处置台账（站方流程自动同步 + 人工补录）
+%s
+
+> 「站方已回复」只说明平台走完了自己的流程，**不等于我方处置完毕**：
+> 投诉工单、对外回应、复盘这些动作仍要人工补录（`msyt case log`），补录同样入链。
+
+## 七、校验结果
 - zip SHA256：见同名 `.zip.sha256.txt`
 - 包内校验：`python verify.py <zip>`
 - 哈希链：seq / hash 见 `chain/chain_head.txt`
 
-## 七、签署
+## 八、签署
 - 取证人员签字：%s　　日期：★ __________
 - 复核人员签字：★ __________　　日期：★ __________
 """ % (case.get("case_id"), case.get("title"), case.get("level") or "",
        op or "★ __________", case.get("created_at") or "", loc or "★ __________",
-       rows, env, op or "★ __________")
+       rows, env, disp_tbl, op or "★ __________")
 
 
 def _verify_src() -> str:

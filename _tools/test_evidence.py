@@ -25,9 +25,10 @@ PROJ = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PROJ, "程序"))
 
 from msyt.db import DB                              # noqa: E402
-from msyt.evidence import (Chain, _verify_zip, add_item,     # noqa: E402
-                           archive_page, create_case, export_case,
-                           record_snapshot, sign_run_env, verify_case)
+from msyt.evidence import (Chain, _verify_zip, add_disposition, add_item,  # noqa: E402
+                           archive_page, create_case, export_case, list_dispositions,
+                           record_snapshot, sign_run_env, sync_dispositions,
+                           verify_case)
 
 FAILED: list[str] = []
 
@@ -199,6 +200,39 @@ def main() -> int:
     check(not r3["ok"], "改签注原件 → 校验 FAILED")
     check(any("env/CAP-TEST-01.json" in x for x in r3["bad"]),
           f"定位到签注原件：{r3['bad'][:1]}")
+
+    # ---- ③.7 处置台账：站方流程同步 + 人工补录 ----
+    print("\n--- ③.7 处置台账 ---")
+    with db.lock:
+        db.conn.execute("INSERT INTO flows(tid,step,name,time,ts) VALUES(?,?,?,?,?)",
+                        (9001, 2, "已回复", "2026-11-22 10:00", 1763776800))
+        db.conn.commit()
+    s1 = sync_dispositions(db, c["case_id"])
+    check(len(s1["added"]) == 2, f"同步站方流程 2 个节点（实得 {len(s1['added'])}）")
+    s2 = sync_dispositions(db, c["case_id"])
+    check(len(s2["added"]) == 0 and s2["skipped"] == 2, "重复同步幂等（已存在全部跳过）")
+    n_disp = db.conn.execute("SELECT COUNT(*) FROM custody_chain WHERE kind='dispose'"
+                             ).fetchone()[0]
+    check(n_disp == 2, f"台账每条都入链 kind=dispose（实得 {n_disp}）")
+    add_disposition(db, c["case_id"], action="投诉", actor="测试",
+                    channel="12345", ticket_no="NB-001", result="已受理")
+    led = list_dispositions(db, c["case_id"])
+    check(len(led) == 3, f"人工补录后台账 3 条（实得 {len(led)}）")
+    try:
+        add_disposition(db, c["case_id"], action="   ")
+        check(False, "空动作仍能写入（应报错）")
+    except ValueError:
+        check(True, "空动作被拒")
+
+    ev3 = export_case(db, c["case_id"], out_dir=os.path.join(tmp, "ev3"))
+    with zipfile.ZipFile(ev3["zip"]) as z:
+        n3 = set(z.namelist())
+        cu3 = z.read("custody.md").decode("utf-8")
+        dj = json.loads(z.read("content/dispositions.json").decode("utf-8"))
+    check("content/dispositions.json" in n3, "处置台账进包")
+    check(len(dj) == 3 and any(d["ticket_no"] == "NB-001" for d in dj),
+          "包内台账含人工补录的工单号")
+    check("## 六、处置台账" in cu3 and "NB-001" in cu3, "笔录里有台账表与工单号")
 
     # ---- ④ 反向 1：改包内正文 ----
     print("\n--- ④ ★反向验证 1：改一个字符（同长度，绕开大小校验）---")

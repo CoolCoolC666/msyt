@@ -29,9 +29,9 @@ from .config import Config
 from .db import DB
 from .detail import DetailCollector
 from .doctor import format_report, run_doctor
-from .evidence import (ROLES, add_item, capture_case, create_case,
-                       export_case, list_cases, sign_run_env, verify_bundle,
-                       verify_case)
+from .evidence import (ROLES, add_disposition, add_item, capture_case, create_case,
+                       export_case, list_cases, list_dispositions, sign_run_env,
+                       sync_dispositions, verify_bundle, verify_case)
 from .http_client import Client
 from .listpage import ListCollector
 from .sources import describe, expand_sources
@@ -483,6 +483,50 @@ def cmd_case_list(args) -> int:
     return 0
 
 
+def cmd_case_sync(args) -> int:
+    db = _db(_cfg(args))
+    try:
+        r = sync_dispositions(db, args.case, actor=args.actor, channel=args.channel)
+    except KeyError as e:
+        print("[台账] %s" % e)
+        return 2
+    print("案件：%s" % r["case_id"])
+    for a in r["added"]:
+        print("  + %s  %s  链 seq=%s" % (a["at"], a["action"], a["seq"]))
+    print("  新增 %d 条，跳过（已存在）%d 条" % (len(r["added"]), r["skipped"]))
+    print("  ★ 同步的是**站方流程**（flows）；我方投诉/回应/复盘请用 case log 补")
+    return 0
+
+
+def cmd_case_log(args) -> int:
+    db = _db(_cfg(args))
+    try:
+        r = add_disposition(db, args.case, action=args.action, actor=args.actor,
+                            channel=args.channel, ticket_no=args.ticket,
+                            result=args.result, note=args.note, at=args.at)
+    except ValueError as e:
+        print("[台账] %s" % e)
+        return 2
+    print("已记录：%s  %s（链 seq=%s）" % (r["at"], r["action"], r["seq"]))
+    return 0
+
+
+def cmd_case_ledger(args) -> int:
+    db = _db(_cfg(args))
+    rows = list_dispositions(db, args.case)
+    print("案件：%s　台账 %d 条" % (args.case, len(rows)))
+    if not rows:
+        print("  （空）站方可先同步：msyt case sync --case %s" % args.case)
+        return 0
+    print("  %-19s %-22s %-10s %-16s %s" % ("时间", "动作", "工单", "结果", "备注"))
+    for r in rows:
+        print("  %s ｜ %s ｜ %s ｜ %s ｜ %s" % (
+            r["at"], r.get("action") or "",
+            (r.get("channel") or "") + (("（%s）" % r["ticket_no"]) if r.get("ticket_no") else ""),
+            r.get("result") or "", r.get("note") or ""))
+    return 0
+
+
 def cmd_evidence_export(args) -> int:
     cfg = _cfg(args)
     db = _db(cfg)
@@ -672,6 +716,25 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_case_add)
     c = csub.add_parser("list", help="列出案件")
     c.set_defaults(func=cmd_case_list)
+    c = csub.add_parser("sync", help="把站方流程（已受理/预回复/已回复）同步成处置台账")
+    c.add_argument("--case", required=True)
+    c.add_argument("--actor", default="站方流程（自动同步）")
+    c.add_argument("--channel", default="bbs.cnnb.com.cn 群众留言板")
+    c.set_defaults(func=cmd_case_sync)
+    c = csub.add_parser("log", help="人工补录一条处置动作（投诉/回应/复盘…）")
+    c.add_argument("--case", required=True)
+    c.add_argument("--action", required=True,
+                   help="发现/告警/上报/核查/投诉/删帖/限流/回应/复盘…")
+    c.add_argument("--actor", default="", help="经办人")
+    c.add_argument("--channel", default="", help="渠道（12345 / 平台工单 / 电话…）")
+    c.add_argument("--ticket", default="", help="工单号/回执号")
+    c.add_argument("--result", default="", help="结果（受理/已删/已回复/驳回…）")
+    c.add_argument("--note", default="")
+    c.add_argument("--at", default="", help="发生时间（默认现在）")
+    c.set_defaults(func=cmd_case_log)
+    c = csub.add_parser("ledger", help="查看处置台账")
+    c.add_argument("--case", required=True)
+    c.set_defaults(func=cmd_case_ledger)
 
     sp = sub.add_parser("evidence", help="存证：导出证据包")
     esub = sp.add_subparsers(dest="ev_cmd", required=True)
