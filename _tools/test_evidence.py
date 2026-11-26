@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(PROJ, "程序"))
 from msyt.db import DB                              # noqa: E402
 from msyt.evidence import (Chain, _verify_zip, add_item,     # noqa: E402
                            archive_page, create_case, export_case,
-                           record_snapshot, verify_case)
+                           record_snapshot, sign_run_env, verify_case)
 
 FAILED: list[str] = []
 
@@ -112,6 +112,17 @@ def main() -> int:
     snap = record_snapshot(db, 9001)
     check(bool(snap) and snap["views"] == 120, f"热度快照写入：{snap}")
 
+    # 一次采集 run（真实链路里由 capture_case 写入，这里手工造同形状的一行）
+    with db.lock:
+        db.conn.execute(
+            "INSERT INTO capture_runs(run_id,case_id,operator,device,os,browser,ip,"
+            "network,tool,tool_ver,started_at,finished_at,clock_source,steps,"
+            "exceptions,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("CAP-TEST-01", c["case_id"], "", "host-x", "Windows 11", "requests",
+             "", "", "msyt-evidence", "test", "2026-11-26 12:00:00", "", "local",
+             "逐页 GET 详情页并归档原始 HTML", "", "2026-11-26 12:00:00"))
+        db.conn.commit()
+
     # ---- ③ 导出 + 正向三查 ----
     print("\n--- ③ 导出证据包并三查 ---")
     ev = export_case(db, c["case_id"], out_dir=os.path.join(tmp, "ev"),
@@ -143,6 +154,51 @@ def main() -> int:
     v = verify_case(db, c["case_id"])
     check(v["ok"], "三查全过（zip/包内/链）")
     check(v["outside"]["match_db"], "zip 与库记录的 bundle_sha256 一致")
+
+    # ---- ③.5 取证环境补签（入链 + 进包）----
+    print("\n--- ③.5 取证环境补签 ---")
+    sign_run_env(db, c["case_id"], operator="李四", device="取证机-A",
+                 ip="10.1.2.3", network="校园网（NAT，出口 IP 会抖动）",
+                 location="宁波·校内", note="事后补签：采集当时未写入")
+    row = db.conn.execute("SELECT operator,ip,network,steps FROM capture_runs "
+                          "WHERE run_id='CAP-TEST-01'").fetchone()
+    check(row[0] == "李四" and row[1] == "10.1.2.3",
+          f"capture_runs 已补签：operator={row[0]} / ip={row[1]}")
+    check("【补签" in (row[3] or ""), "steps 里留下补签痕迹（不抹掉原件说明）")
+    ent = db.conn.execute("SELECT seq,payload_sha256 FROM custody_chain "
+                          "WHERE kind='run.sign' ORDER BY seq DESC LIMIT 1").fetchone()
+    check(bool(ent), f"链上出现 run.sign（seq={ent[0] if ent else '-'}）")
+    envfile = os.path.join(tmp, "evidence", "env", "CAP-TEST-01.json")
+    import hashlib
+    with open(envfile, "rb") as f:
+        raw = f.read()
+    check(hashlib.sha256(raw).hexdigest() == ent[1],
+          "签注原件字节 == 链上 payload（可复算）")
+
+    ev2 = export_case(db, c["case_id"], out_dir=os.path.join(tmp, "ev2"),
+                      operator="李四")
+    with zipfile.ZipFile(ev2["zip"]) as z:
+        n2 = set(z.namelist())
+        cu = z.read("custody.md").decode("utf-8")
+    check("env/CAP-TEST-01.json" in n2 and "env/capture_runs.json" in n2,
+          "签注原件与环境表都进包")
+    check("补签声明" in cu and "10.1.2.3" in cu, "笔录写明「补签」与实测 IP")
+
+    # ---- ③.6 ★反向 3：改签注原件一个字节 ----
+    print("\n--- ③.6 ★反向验证 3：改签注原件 ---")
+    bad2 = os.path.join(tmp, "bad_env.zip")
+    with zipfile.ZipFile(ev2["zip"]) as z:
+        items2 = {n: z.read(n) for n in z.namelist()}
+    d = bytearray(items2["env/CAP-TEST-01.json"])
+    d[d.find(b"10.1.2.3")] ^= 0x01
+    items2["env/CAP-TEST-01.json"] = bytes(d)
+    with zipfile.ZipFile(bad2, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, dd in items2.items():
+            z.writestr(n, dd)
+    r3 = _verify_zip(bad2)
+    check(not r3["ok"], "改签注原件 → 校验 FAILED")
+    check(any("env/CAP-TEST-01.json" in x for x in r3["bad"]),
+          f"定位到签注原件：{r3['bad'][:1]}")
 
     # ---- ④ 反向 1：改包内正文 ----
     print("\n--- ④ ★反向验证 1：改一个字符（同长度，绕开大小校验）---")

@@ -30,7 +30,8 @@ from .db import DB
 from .detail import DetailCollector
 from .doctor import format_report, run_doctor
 from .evidence import (ROLES, add_item, capture_case, create_case,
-                       export_case, list_cases, verify_bundle, verify_case)
+                       export_case, list_cases, sign_run_env, verify_bundle,
+                       verify_case)
 from .http_client import Client
 from .listpage import ListCollector
 from .sources import describe, expand_sources
@@ -521,6 +522,25 @@ def cmd_evidence_capture(args) -> int:
     return 0
 
 
+def cmd_custody_sign(args) -> int:
+    db = _db(_cfg(args))
+    try:
+        r = sign_run_env(db, args.case, operator=args.operator, device=args.device,
+                         ip=args.ip, network=args.network, location=args.location,
+                         note=args.note, run_ids=(args.run or None))
+    except KeyError as e:
+        print("[补签] %s" % e)
+        return 2
+    print("案件：%s" % r["case_id"])
+    for s in r["signed"]:
+        print("  %s → 链 seq=%s  payload=%s…" % (s["run_id"], s["seq"],
+                                                s["payload_sha256"][:16]))
+        print("    签注原件：%s" % s["json"])
+    print("  ★ 这是补记：签注时间与采集时间不同，包里会写明；不影响已有载体哈希")
+    print("  下一步：msyt evidence export --case %s" % r["case_id"])
+    return 0
+
+
 def cmd_custody_verify(args) -> int:
     cfg = _cfg(args) if (args.case or not args.bundle) else None
     if args.bundle:
@@ -665,8 +685,19 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--pages", type=int, default=3, help="每条最多补采几页")
     e.set_defaults(func=cmd_evidence_capture)
 
-    sp = sub.add_parser("custody", help="存证：校验")
+    sp = sub.add_parser("custody", help="存证：补签环境 / 校验")
     usub = sp.add_subparsers(dest="cu_cmd", required=True)
+    g = usub.add_parser("sign", help="补签取证环境（人员/设备/IP/网络/地点），入链")
+    g.add_argument("--case", required=True)
+    g.add_argument("--operator", default="", help="取证人员（签名位）")
+    g.add_argument("--device", default="", help="取证设备（主机名/型号）")
+    g.add_argument("--ip", default="", help="签注时实测出口公网 IP")
+    g.add_argument("--network", default="", help="网络环境说明（如 校园网，出口 IP 会抖动）")
+    g.add_argument("--location", default="", help="取证地点")
+    g.add_argument("--note", default="", help="补充说明（进 steps 与签注原件）")
+    g.add_argument("--run", action="append", default=[],
+                   help="只签指定 run_id（可重复；默认该案件全部 run）")
+    g.set_defaults(func=cmd_custody_sign)
     v = usub.add_parser("verify", help="三查：zip 哈希 / 包内文件 / 哈希链")
     v.add_argument("--case", default="", help="按案件校验（会连库比 bundle_sha256）")
     v.add_argument("--bundle", default="", help="只校验一个 zip（不连库）")

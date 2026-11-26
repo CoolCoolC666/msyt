@@ -385,6 +385,74 @@ def capture_case(db, cfg, case_id: str, pages: int = 3,
             "errors": errs[:10], "items": len(items)}
 
 
+def sign_run_env(db, case_id: str, operator: str = "", device: str = "",
+                 ip: str = "", network: str = "", location: str = "",
+                 note: str = "", run_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """补签取证环境（人工签名位）。
+
+    ★ 诚实边界：这是**事后补记**，不是采集当时自动写入。
+      为了不让「补记」变成「伪造」，做三件事：
+        1. `capture_runs.steps` 里追加「【补签 <时间>】」与地点、说明，
+           原件不会被悄悄抹掉；
+        2. 签注内容原样落成 `env/<run_id>.json`（与链上 payload **同字节**），
+           evidence export 时进包；
+        3. 入链 `run.sign`，payload_sha256 = SHA256(canon(签注内容)) ——
+           事后改任何一个字段，包内文件与链就对不上。
+    """
+    rows = _rows(db.conn, "SELECT * FROM capture_runs WHERE case_id=? ORDER BY run_id",
+                 (case_id,))
+    if run_ids:
+        keep = set(run_ids)
+        rows = [r for r in rows if r["run_id"] in keep]
+    if not rows:
+        raise KeyError("案件 %s 还没有 capture_runs 记录（先 capture 一次再签）" % case_id)
+
+    env_dir = os.path.join(evidence_root(db.path), "env")
+    os.makedirs(env_dir, exist_ok=True)
+    chain = Chain(db.conn)
+    signed: List[Dict[str, Any]] = []
+
+    for r in rows:
+        ann = {
+            "case_id": case_id,
+            "run_id": r["run_id"],
+            "operator": operator or (r.get("operator") or ""),
+            "device": device or (r.get("device") or ""),
+            "os": r.get("os") or "",
+            "browser": r.get("browser") or "",
+            "ip": ip or (r.get("ip") or ""),
+            "network": network or (r.get("network") or ""),
+            "location": location,
+            "note": note,
+            "signed_at": now_str(),
+            "provenance": "补签：采集时刻未写入，签注时按实际环境填写",
+        }
+        body = canon(ann).encode("utf-8")
+        with open(os.path.join(env_dir, r["run_id"] + ".json"), "wb") as f:
+            f.write(body)
+
+        steps = (r.get("steps") or "").strip()
+        add = "【补签 %s】" % ann["signed_at"]
+        if location:
+            add += "取证地点：%s；" % location
+        if note:
+            add += note
+        with db.lock:
+            db.conn.execute(
+                "UPDATE capture_runs SET operator=?, device=?, ip=?, network=?, steps=? "
+                "WHERE run_id=?",
+                (ann["operator"], ann["device"], ann["ip"], ann["network"],
+                 (steps + "\n" + add).strip(), r["run_id"]))
+            db.conn.commit()
+
+        ev = chain.append("run.sign", "capture_runs", r["run_id"], sha256_bytes(body))
+        signed.append({"run_id": r["run_id"], "seq": ev["seq"],
+                       "payload_sha256": ev["payload_sha256"],
+                       "json": "env/%s.json" % r["run_id"]})
+
+    return {"case_id": case_id, "signed": signed}
+
+
 def _rows(conn, sql: str, args: tuple = ()) -> List[Dict[str, Any]]:
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
@@ -458,6 +526,17 @@ def export_case(db, case_id: str, out_dir: str = "",
         "sample_review": _rows(db.conn, "SELECT * FROM sample_review WHERE tid IN (%s)" % q, tuple(tids)),
     }
     files["content/annotations.json"] = json.dumps(annos, ensure_ascii=False, indent=1).encode("utf-8")
+
+    # 取证环境（capture_runs）+ 补签原件（env/<run_id>.json，与链上 payload 同字节）
+    runs = _rows(db.conn, "SELECT * FROM capture_runs WHERE case_id=? ORDER BY run_id",
+                 (case_id,))
+    files["env/capture_runs.json"] = json.dumps(
+        runs, ensure_ascii=False, indent=1).encode("utf-8")
+    for r in runs:
+        p = os.path.join(evidence_root(db.path), "env", (r["run_id"] or "") + ".json")
+        if r["run_id"] and os.path.exists(p):
+            with open(p, "rb") as f:
+                files["env/%s.json" % r["run_id"]] = f.read()
 
     # 全文（便于人读；不作为原件，原件是 posts.json）
     for th in threads:
@@ -549,7 +628,7 @@ def export_case(db, case_id: str, out_dir: str = "",
     files["manifest.sha256"] = (sha256_bytes(man_bytes) + "  manifest.json\n").encode("utf-8")
 
     # ---- 笔录模板 ----
-    files["custody.md"] = _custody_md(case, items, operator).encode("utf-8")
+    files["custody.md"] = _custody_md(case, items, operator, runs).encode("utf-8")
     files["README.txt"] = _readme_txt(bundle_id).encode("utf-8")
     files["verify.py"] = _verify_src().encode("utf-8")
 
@@ -711,9 +790,43 @@ bundle: %s
 
 
 def _custody_md(case: Dict[str, Any], items: List[Dict[str, Any]],
-                operator: str) -> str:
+                operator: str, runs: Optional[List[Dict[str, Any]]] = None) -> str:
     rows = "\n".join("| %s | %s | %s |" % (i["tid"], i.get("role") or "", i.get("note") or "")
                      for i in items)
+    runs = runs or []
+    signed = [r for r in runs if (r.get("operator") or "").strip()]
+    r0 = signed[0] if signed else {}
+    op = operator or (r0.get("operator") or "")
+    loc = ""
+    for r in signed:
+        for line in (r.get("steps") or "").splitlines():
+            if "取证地点：" in line:
+                loc = line.split("取证地点：", 1)[1].split("；")[0].strip()
+    if signed:
+        env = "\n".join([
+            "- 取证设备（主机名/型号）：%s" % (r0.get("device") or ""),
+            "- 操作系统：%s" % (r0.get("os") or ""),
+            "- 取证工具 / 浏览器：%s" % (r0.get("browser") or ""),
+            "- 出口公网 IP：%s" % (r0.get("ip") or ""),
+            "- 网络环境：%s" % (r0.get("network") or ""),
+            "- 取证地点：%s" % (loc or "（未填）"),
+            "- 取证工具：msyt-evidence（版本见 manifest.json）",
+            "",
+            "> **补签声明**：以上环境字段为**采集之后补记**（签注时间见 `env/%s.json`），"
+            % (r0.get("run_id") or ""),
+            "> 采集当时只写了设备与系统，人员/IP/网络为空白。IP 为签注时实测出口地址，",
+            "> 校园网 NAT 环境下该地址可能变化，变化本身不改变证据内容。",
+            "> 每条签注的原件已入哈希链（kind=`run.sign`），改一个字段即断链。",
+        ])
+    else:
+        env = "\n".join([
+            "- 取证设备（主机名/型号）：★ __________",
+            "- 操作系统：★ __________",
+            "- 浏览器及版本：★ __________",
+            "- 出口公网 IP：★ __________",
+            "- 网络环境（家宽 / 4G / 代理 / 隧道）：★ __________",
+            "- 取证工具：msyt-evidence（版本见 manifest.json）",
+        ])
     return """# 电子数据取证笔录
 
 > 本文件由系统生成框架，**带 ★ 的字段必须由取证人员手工填写并签字**。
@@ -723,22 +836,17 @@ def _custody_md(case: Dict[str, Any], items: List[Dict[str, Any]],
 - 案件编号：%s
 - 案件标题：%s
 - 风险等级：%s
-- 责任（经办）人：★ __________
+- 责任（经办）人：%s
 - 取证时间：%s（本机时钟，clock_source=local）
-- 取证地点：★ __________
+- 取证地点：%s
 
 ## 二、取证对象
 | tid | 角色 | 备注 |
 |---|---|---|
 %s
 
-## 三、取证环境（★ 手工核对后填写）
-- 取证设备（主机名/型号）：★ __________
-- 操作系统：★ __________
-- 浏览器及版本：★ __________
-- 出口公网 IP：★ __________
-- 网络环境（家宽 / 4G / 代理 / 隧道）：★ __________
-- 取证工具：msyt-evidence（版本见 manifest.json）
+## 三、取证环境
+%s
 
 ## 四、操作过程（★ 逐步写清访问路径与操作）
 1. ★ 打开 __________
@@ -753,10 +861,11 @@ def _custody_md(case: Dict[str, Any], items: List[Dict[str, Any]],
 - 哈希链：seq / hash 见 `chain/chain_head.txt`
 
 ## 七、签署
-- 取证人员签字：★ __________　　日期：★ __________
+- 取证人员签字：%s　　日期：★ __________
 - 复核人员签字：★ __________　　日期：★ __________
 """ % (case.get("case_id"), case.get("title"), case.get("level") or "",
-       case.get("created_at") or "", rows)
+       op or "★ __________", case.get("created_at") or "", loc or "★ __________",
+       rows, env, op or "★ __________")
 
 
 def _verify_src() -> str:
