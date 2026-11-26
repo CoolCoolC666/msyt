@@ -29,6 +29,8 @@ from .config import Config
 from .db import DB
 from .detail import DetailCollector
 from .doctor import format_report, run_doctor
+from .evidence import (ROLES, add_item, create_case, export_case,
+                       list_cases, verify_bundle, verify_case)
 from .http_client import Client
 from .listpage import ListCollector
 from .sources import describe, expand_sources
@@ -439,6 +441,103 @@ def cmd_web(args) -> int:
     return 0
 
 
+# ================================================================== 存证域
+def cmd_case_new(args) -> int:
+    """建一个案件 —— 存证域里「一起舆情事件」的容器。"""
+    cfg = _cfg(args)
+    db = _db(cfg)
+    c = create_case(db, args.title, level=args.level, category=args.category,
+                    summary=args.summary, owner=args.owner,
+                    created_by=args.by)
+    print("案件已建立：%s" % c["case_id"])
+    print("  标题：%s" % c["title"])
+    print("  等级：%s ｜ 状态：%s" % (c.get("level") or "", c.get("status") or ""))
+    print("  下一步：msyt case add --case %s --tid <tid>" % c["case_id"])
+    return 0
+
+
+def cmd_case_add(args) -> int:
+    cfg = _cfg(args)
+    db = _db(cfg)
+    r = add_item(db, args.case, args.tid, role=args.role,
+                 added_by=args.by, note=args.note)
+    print("已加入 %s：tid=%s（%s）" % (r["case_id"], r["tid"], r["role"]))
+    print("  %s" % (r.get("title") or ""))
+    print("  %s" % (r.get("url") or ""))
+    return 0
+
+
+def cmd_case_list(args) -> int:
+    cfg = _cfg(args)
+    db = _db(cfg)
+    rows = list_cases(db)
+    if not rows:
+        print("还没有案件。用 msyt case new --title \"…\" 建一个。")
+        return 0
+    print("%-16s %-6s %-4s %-5s %s" % ("案件", "条目", "等级", "状态", "标题"))
+    for r in rows:
+        print("%-16s %-6s %-4s %-5s %s" % (r["case_id"], r["items"],
+                                           r.get("level") or "", r.get("status") or "",
+                                           r.get("title") or ""))
+    return 0
+
+
+def cmd_evidence_export(args) -> int:
+    cfg = _cfg(args)
+    db = _db(cfg)
+    try:
+        r = export_case(db, args.case, out_dir=args.out, operator=args.operator)
+    except (KeyError, ValueError, FileNotFoundError) as e:
+        print("[存证] 导出失败：%s" % e)
+        return 2
+    print("证据包已生成：%s" % r["bundle_id"])
+    print("  zip      ：%s" % r["zip"])
+    print("  SHA256   ：%s" % r["zip_sha256"])
+    print("  链位置    ：seq=%s  hash=%s" % (r["chain_seq"], r["chain_hash"][:16] + "…"))
+    print("  内容      ：%d 个文件 / %d 层正文" % (r["files"], r["posts"]))
+    print("  ★ 交付时把 %s 一起给对方（证明这个 zip 本身没被改）" % os.path.basename(r["sha256_file"]))
+    return 0
+
+
+def cmd_custody_verify(args) -> int:
+    cfg = _cfg(args) if (args.case or not args.bundle) else None
+    if args.bundle:
+        try:
+            r = verify_bundle(args.bundle)
+        except (FileNotFoundError,) as e:
+            print("[校验] %s" % e)
+            return 2
+        print("包内文件：%s" % ("通过" if r["inner"]["ok"] else "不通过"))
+        for x in r["inner"]["bad"][:20]:
+            print("  [X] %s" % x)
+        if r["inner"]["chain_bad"]:
+            print("  [X] %s" % r["inner"]["chain_bad"])
+        print("外部哈希：%s" % ("通过" if r["match_sidecar"] else
+                                ("未找到 .sha256.txt（无法比对 zip 本身）" if r["match_sidecar"] is None
+                                 else "不通过")))
+        print("RESULT：%s" % ("OK" if r["ok"] else "FAILED"))
+        return 0 if r["ok"] else 1
+
+    db = _db(cfg)
+    try:
+        r = verify_case(db, args.case)
+    except (KeyError, FileNotFoundError) as e:
+        print("[校验] %s" % e)
+        return 2
+    print("案件：%s" % args.case)
+    print("  zip 与库记录：%s" % ("一致" if r["outside"]["match_db"] else "不一致"))
+    print("  zip 与外部哈希文件：%s" % ("一致" if r["outside"]["match_sidecar"] else "不一致"))
+    print("  包内文件：%s（%s）" % ("通过" if r["inner"]["ok"] else "不通过",
+                                   "、".join(r["inner"]["bad"][:5]) or "无异常"))
+    if r["inner"]["chain_bad"]:
+        print("  链片段：%s" % r["inner"]["chain_bad"])
+    print("  哈希链：%s（共 %s 条，head=%s…）" % (
+        "完整" if r["chain"]["ok"] else "断裂于 seq=%s" % r["chain"]["broken_at"],
+        r["chain"]["total"], (r["chain"]["head"] or "")[:16]))
+    print("RESULT：%s" % ("OK" if r["ok"] else "FAILED"))
+    return 0 if r["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="msyt", description="民生e点通·天一论坛 群众留言板 舆情采集器")
@@ -507,6 +606,45 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("export", help="导出 CSV")
     sp.add_argument("--out", default="threads.csv")
     sp.set_defaults(func=cmd_export)
+
+    # ---- 存证域（2026-11-26 加）--------------------------------------
+    #   ★ 只做「案件」这一层，不给 threads/posts 加列 —— 见 evidence.py 顶注。
+    sp = sub.add_parser("case", help="舆情案件（存证域的容器）")
+    csub = sp.add_subparsers(dest="case_cmd", required=True)
+    c = csub.add_parser("new", help="新建案件")
+    c.add_argument("--title", required=True, help="案件标题")
+    c.add_argument("--level", default="一般",
+                   choices=["一般", "较大", "重大", "特别重大"])
+    c.add_argument("--category", default="",
+                   help="不实信息/投诉纠纷/恶意攻击/谣言/误解/其他")
+    c.add_argument("--summary", default="")
+    c.add_argument("--owner", default="", help="责任人（人工填）")
+    c.add_argument("--by", default="", help="建立人")
+    c.set_defaults(func=cmd_case_new)
+    c = csub.add_parser("add", help="把帖子挂到案件上")
+    c.add_argument("--case", required=True)
+    c.add_argument("--tid", type=int, required=True)
+    c.add_argument("--role", default="first", choices=list(ROLES))
+    c.add_argument("--by", default="")
+    c.add_argument("--note", default="")
+    c.set_defaults(func=cmd_case_add)
+    c = csub.add_parser("list", help="列出案件")
+    c.set_defaults(func=cmd_case_list)
+
+    sp = sub.add_parser("evidence", help="存证：导出证据包")
+    esub = sp.add_subparsers(dest="ev_cmd", required=True)
+    e = esub.add_parser("export", help="导出案件证据包（zip + 外部哈希 + 入链）")
+    e.add_argument("--case", required=True)
+    e.add_argument("--out", default="", help="输出目录（默认 程序/data/evidence）")
+    e.add_argument("--operator", default="", help="取证人员（写进 manifest）")
+    e.set_defaults(func=cmd_evidence_export)
+
+    sp = sub.add_parser("custody", help="存证：校验")
+    usub = sp.add_subparsers(dest="cu_cmd", required=True)
+    v = usub.add_parser("verify", help="三查：zip 哈希 / 包内文件 / 哈希链")
+    v.add_argument("--case", default="", help="按案件校验（会连库比 bundle_sha256）")
+    v.add_argument("--bundle", default="", help="只校验一个 zip（不连库）")
+    v.set_defaults(func=cmd_custody_verify)
 
     sp = sub.add_parser("web", help="启动本地 Web 前端")
     sp.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")

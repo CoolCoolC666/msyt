@@ -40,7 +40,8 @@ jobs:
             test_topic_naming.py \
             test_export_columns.py \
             test_keywords.py \
-            test_thread_tags.py
+            test_thread_tags.py \
+            test_evidence.py
           do
             echo "===== $t ====="
             python "_tools/$t"

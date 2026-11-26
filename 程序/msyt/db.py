@@ -570,6 +570,162 @@ CREATE TRIGGER IF NOT EXISTS posts_au AFTER UPDATE ON posts BEGIN
     VALUES ('delete', old.pid, old.content);
     INSERT INTO posts_fts(rowid, content) VALUES (new.pid, new.content);
 END;
+
+-- ================================================================ 存证域（2026-11-26 加）
+-- ★ 为什么单独建一套表，而不给 threads / posts 加列：
+--   采集是「面」（61 万帖，天天跑），证据是「点」（几十条，要封存）。
+--   两者生命周期完全不同：给 2.5 GB 的热表加列 = 全表重写风险，
+--   而且 61 万帖里真正进入研判/处置的只有极小一部分，全量哈希毫无意义。
+-- ★ 全部 IF NOT EXISTS：在线执行毫秒级，不锁正在跑的增量任务。
+
+CREATE TABLE IF NOT EXISTS cases (
+    case_id       TEXT PRIMARY KEY,          -- MSYT-2026-0001
+    title         TEXT NOT NULL,
+    summary       TEXT,
+    level         TEXT,                      -- 一般/较大/重大/特别重大
+    category      TEXT,                      -- 不实信息/投诉纠纷/恶意攻击/谣言/误解/其他
+    sentiment     TEXT,                      -- 负面/中性/正面
+    sentiment_score REAL,
+    involved      TEXT,                      -- JSON：涉事单位/人/产品
+    status        TEXT DEFAULT 'open',       -- open/capturing/sealed/disposed/closed
+    owner         TEXT,                      -- 责任人（人工填，服务端不代填）
+    created_by    TEXT,
+    created_at    TEXT,
+    sealed_at     TEXT,
+    bundle_path   TEXT,
+    bundle_sha256 TEXT,
+    note          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS case_items (
+    case_id  TEXT NOT NULL,
+    tid      INTEGER NOT NULL,
+    role     TEXT,        -- first 首发 / reply 回应 / quote 引用 / repost 搬运 / comment 评论
+    added_by TEXT,
+    added_at TEXT,
+    note     TEXT,
+    PRIMARY KEY (case_id, tid)
+);
+CREATE INDEX IF NOT EXISTS idx_case_items_tid ON case_items(tid);
+
+CREATE TABLE IF NOT EXISTS capture_runs (
+    run_id         TEXT PRIMARY KEY,         -- CAP-20261126-01
+    case_id        TEXT,
+    operator       TEXT,                     -- 取证人员（人工签名位）
+    device         TEXT,
+    os             TEXT,
+    browser        TEXT,
+    ip             TEXT,                     -- 取证时出口公网 IP
+    network        TEXT,
+    tool           TEXT,
+    tool_ver       TEXT,
+    started_at     TEXT,
+    finished_at    TEXT,
+    clock_source   TEXT,                     -- local / ntp / tsa
+    clock_offset_ms INTEGER,
+    steps          TEXT,
+    exceptions     TEXT,                     -- ★ 拿不到的内容及原因（必备）
+    log_ref        TEXT,
+    created_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS evidence_files (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id       TEXT NOT NULL,
+    tid           INTEGER,
+    run_id        TEXT,
+    kind          TEXT NOT NULL,             -- mhtml/png/mp4/json/txt/pdf
+    rel_path      TEXT NOT NULL,             -- 相对 evidence_root
+    bytes         INTEGER,
+    sha256        TEXT NOT NULL,
+    algo          TEXT DEFAULT 'sha256',
+    captured_at   TEXT,
+    source_url    TEXT,                      -- 实际抓取的原始 URL（含参数，原样）
+    http_status   INTEGER,
+    capture_limit TEXT,                      -- ok/restricted/login-wall/timeout
+    note          TEXT,
+    UNIQUE(case_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_ev_case ON evidence_files(case_id, kind);
+CREATE INDEX IF NOT EXISTS idx_ev_sha  ON evidence_files(sha256);
+
+CREATE TABLE IF NOT EXISTS interaction_snapshots (
+    tid          INTEGER NOT NULL,
+    captured_at  TEXT NOT NULL,
+    views        INTEGER,
+    replies      INTEGER,
+    likes        INTEGER,
+    favorites    INTEGER,
+    shares       INTEGER,
+    raw          TEXT,
+    run_id       TEXT,
+    PRIMARY KEY (tid, captured_at)
+);
+
+CREATE TABLE IF NOT EXISTS propagation_edges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id     TEXT,
+    src_tid     INTEGER, src_url TEXT,
+    dst_tid     INTEGER, dst_url TEXT,
+    kind        TEXT,                        -- quote/repost/搬运/截图
+    platform    TEXT,
+    evidence_id INTEGER,
+    first_seen  TEXT,
+    note        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS subject_accounts (
+    platform    TEXT NOT NULL,
+    uid         TEXT NOT NULL,
+    uid_hash    TEXT,                        -- 对外/公开版用加盐哈希
+    nickname    TEXT,
+    homepage    TEXT,
+    avatar_path TEXT,
+    verified    TEXT,
+    snapshot_at TEXT,
+    evidence_id INTEGER,
+    risk_flag   TEXT,
+    PRIMARY KEY (platform, uid)
+);
+
+CREATE TABLE IF NOT EXISTS dispositions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id     TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    actor       TEXT,                        -- 经办人（人工）
+    action      TEXT,                        -- 发现/告警/上报/核查/投诉/删帖/限流/回应/复盘
+    channel     TEXT,
+    ticket_no   TEXT,
+    result      TEXT,
+    evidence_id INTEGER,
+    note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_disp_case ON dispositions(case_id, at);
+
+-- ★ 哈希链：全局 append-only。每一行把上一行的 this_hash 串进来，
+--   改任何一条历史记录都会让后面整条链对不上 —— 这就是「台账有没有被事后改过」的答案。
+CREATE TABLE IF NOT EXISTS custody_chain (
+    seq            INTEGER PRIMARY KEY,
+    at             TEXT NOT NULL,
+    kind           TEXT NOT NULL,            -- chain.genesis/case.create/item.add/bundle.export/dispose/seal
+    ref_table      TEXT,
+    ref_id         TEXT,
+    payload_sha256 TEXT NOT NULL,
+    prev_hash      TEXT NOT NULL,
+    this_hash      TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS tsa_receipts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_seq     INTEGER,
+    target_sha256 TEXT,
+    provider      TEXT,
+    token_path    TEXT,
+    gen_time      TEXT,
+    verify_url    TEXT,
+    verify_result TEXT,
+    created_at    TEXT
+);
 """
 
 
