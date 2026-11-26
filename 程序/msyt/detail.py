@@ -38,6 +38,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .config import AJAX_URL, BASE, Config, THREAD_URL
 from .db import DB
+from .evidence import archive_page, record_snapshot
 from .http_client import Client, HttpError
 from .parsers import (ThreadPage, is_out_of_range_page, parse_ajax_posts,
                      parse_site_notice, parse_thread_page)
@@ -217,13 +218,18 @@ class DetailCollector:
                         restricted = self.db._clean_notice(notice)
                         last_error = restricted
                         self._note_restricted_evidence(tid, html, page_no, "复验也不正常")
+                        self._archive(tid, page_no, html, "restricted")
                         break
                 else:
                     restricted = self.db._clean_notice(notice)
                     last_error = restricted
                     self._note_restricted_evidence(tid, html, page_no, "复验仍是提示页")
+                    self._archive(tid, page_no, html, "restricted")
                     break
 
+            # ★ 存证：把**刚拿到的这一页原始 HTML** 归档（不再多请求一次）。
+            #   只有 tid 在案件里才落盘；其余帖是一次空查询，零成本。
+            self._archive(tid, page_no, html, "")
             tp = parse_thread_page(html, tid=tid, page_no=page_no)
             if not tp.token:
                 # ★★ 2026-10-29：**站方标的页数不可信**，它会多标
@@ -387,6 +393,10 @@ class DetailCollector:
         if restricted:
             self.db.mark_restricted(tid, restricted)
             self.db.log("detail", str(tid), "restricted", False, restricted)
+            try:                                  # 受限也要记热度快照（阅读/回复在涨）
+                record_snapshot(self.db, tid)
+            except Exception:                     # noqa: BLE001
+                pass
             return {"tid": tid, "ok": False, "restricted": True,
                     "reason": restricted, "pages": 0, "posts": 0, "chars": 0,
                     "error": restricted, "problems": [], "warnings": [],
@@ -581,6 +591,10 @@ class DetailCollector:
             pages_total=pages_fetched, posts_n=len(unique), chars=chars)
         self.db.set_detail_state(tid, "done", "", pages_done=pages_fetched,
                                  pages_total=pages_fetched)
+        try:                                      # 存证：热度快照（只对案件条目生效）
+            record_snapshot(self.db, tid)
+        except Exception as e:                    # noqa: BLE001
+            self.db.log("evidence", str(tid), "snapshot_err", False, str(e))
         # ★★ 「少贴」的标记动作放在**这里**（写完 done 之后）——
         #   放前面会被上面的 set_thread_detail(state="done") 覆盖掉（实测踩过）。
         #   效果：原帖**保留**、状态标成 stale（界面显示「待更新」）、
@@ -1021,6 +1035,22 @@ class DetailCollector:
         self.db.log("detail", str(tid), "restricted_evidence", False,
                     f"page={page_no} {why} 字节={len(html or '')} "
                     f"楼层锚点={n_anchor} title={title!r}")
+
+    def _archive(self, tid: int, page_no: int, html: str, limit: str = "") -> None:
+        """把这一页的**原始 HTML** 归档进存证域（只有案件条目才落盘）。
+
+        ★ 三条纪律
+          ① **不额外请求**：用的是采集器刚收到的响应体，零流量、零限速风险。
+          ② **不阻断采集**：任何异常都吞掉写 fetch_log —— 存证不能把采集搞挂。
+          ③ **不美化**：restricted 的提示页也照原样存（它本身就是"当时打不开"的证据）。
+        """
+        try:
+            archive_page(self.db, tid, page_no,
+                         THREAD_URL.format(tid=tid, page=page_no),
+                         html, capture_limit=limit)
+        except Exception as e:                       # noqa: BLE001
+            self.db.log("evidence", str(tid), "archive_err", False, str(e))
+
 
     # ------------------------------------------------------------------
     def _expected_posts(self, tid: int) -> int:

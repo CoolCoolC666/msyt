@@ -233,7 +233,158 @@ def list_cases(db) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-# ------------------------------------------------------------------ 导出
+# ------------------------------------------------------------------ 载体：随采集归档
+def case_ids_of(conn, tid: int) -> List[str]:
+    """这个 tid 属于哪些案件（没有就返回空 → 归档直接 no-op）。"""
+    return [r[0] for r in conn.execute(
+        "SELECT case_id FROM case_items WHERE tid=?", (int(tid),)).fetchall()]
+
+
+def archive_page(db, tid: int, page_no: int, url: str, html: str,
+                 http_status: int = 200, capture_limit: str = "",
+                 run_id: str = "", note: str = "") -> List[Dict[str, Any]]:
+    """把**采集器手里刚拿到的页面 HTML** 归档为载体证据（零额外请求）。
+
+    ★ 为什么在采集里做，而不是事后再抓一遍
+      用户实测：站方大量历史帖现在**已经打不开**（restricted / 删帖 / 提示页）。
+      事后再抓只会得到 404 或"仅作者可见"，那不是证据，是二次失败。
+      证据必须在**拿到的那一刻**固定 —— 这里用的就是 detail 采集器刚收到的
+      服务器原始响应体，不截图、不重渲染、不二次加工。
+
+    ★ 代价：只有 tid 在案件里才落盘（612 万次调用里绝大多数是一次带索引的
+      空查询），不会把 61 万帖都存成 HTML。
+    """
+    cases = case_ids_of(db.conn, tid)
+    if not cases or not html:
+        return []
+    data = html.encode("utf-8")
+    sha = sha256_bytes(data)
+    root = evidence_root(db.path)
+    out = []
+    for case_id in cases:
+        pat = "pages/%s/p%s_%%" % (int(tid), int(page_no))
+        dup = db.conn.execute(
+            "SELECT rel_path FROM evidence_files WHERE case_id=? AND tid=? AND "
+            "sha256=? AND rel_path LIKE ?", (case_id, int(tid), sha, pat)).fetchone()
+        if dup:
+            continue
+        rel = "pages/%s/p%s_%s.html" % (int(tid), int(page_no),
+                                        time.strftime("%Y%m%dT%H%M%S"))
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data)
+        at = now_str()
+        with db.lock:
+            db.conn.execute(
+                "INSERT OR IGNORE INTO evidence_files(case_id,tid,run_id,kind,rel_path,"
+                "bytes,sha256,algo,captured_at,source_url,http_status,capture_limit,note) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (case_id, int(tid), run_id, "html", rel, len(data), sha, ALGO,
+                 at, url, int(http_status), capture_limit, note))
+            db.conn.commit()
+        Chain(db.conn).append("file.add", "evidence_files",
+                              "%s:%s" % (case_id, rel),
+                              sha256_bytes(canon({"case_id": case_id, "rel": rel,
+                                                  "sha256": sha}).encode("utf-8")))
+        out.append({"case_id": case_id, "tid": int(tid), "page": int(page_no),
+                    "rel_path": rel, "sha256": sha, "bytes": len(data)})
+    return out
+
+
+def note_missing(db, case_id: str, tid: int, url: str, reason: str,
+                 run_id: str = "") -> Dict[str, Any]:
+    """拿不到载体时**如实记一条**（不生成任何"看起来像页面"的东西）。"""
+    with db.lock:
+        db.conn.execute(
+            "INSERT INTO evidence_files(case_id,tid,run_id,kind,rel_path,bytes,sha256,"
+            "algo,captured_at,source_url,http_status,capture_limit,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (case_id, int(tid), run_id, "absent", "", 0,
+             sha256_bytes(("absent|%s|%s" % (tid, reason)).encode("utf-8")),
+             ALGO, now_str(), url, 0, reason, reason))
+        db.conn.commit()
+    return {"case_id": case_id, "tid": int(tid), "absent": reason}
+
+
+def record_snapshot(db, tid: int, run_id: str = "") -> Optional[Dict[str, Any]]:
+    """互动数据的时间点快照（views/replies）。只在案件条目上写。"""
+    if not case_ids_of(db.conn, tid):
+        return None
+    r = db.conn.execute("SELECT tid,views,replies FROM threads WHERE tid=?",
+                        (int(tid),)).fetchone()
+    if not r:
+        return None
+    at = now_str()
+    raw = json.dumps({"tid": int(tid), "views": r["views"], "replies": r["replies"]},
+                     ensure_ascii=False)
+    with db.lock:
+        db.conn.execute(
+            "INSERT OR REPLACE INTO interaction_snapshots(tid,captured_at,views,"
+            "replies,raw,run_id) VALUES(?,?,?,?,?,?)",
+            (int(tid), at, r["views"], r["replies"], raw, run_id))
+        db.conn.commit()
+    return {"tid": int(tid), "at": at, "views": r["views"], "replies": r["replies"]}
+
+
+def capture_case(db, cfg, case_id: str, pages: int = 3,
+                 run_id: str = "") -> Dict[str, Any]:
+    """**补采**载体（针对已经在库里的案件条目）。
+
+    ★ 这是补救手段，不是主路径：主路径是采集器边采边归档（archive_page）。
+      页面已经打不开时，这里只会写下 `absent` 记录 + exceptions，绝不伪造。
+    """
+    import platform as _plat
+    from .config import THREAD_URL
+    from .http_client import Client, HttpError
+
+    run_id = run_id or ("CAP-" + time.strftime("%Y%m%dT%H%M%S"))
+    items = _rows(db.conn, "SELECT * FROM case_items WHERE case_id=? ORDER BY tid",
+                  (case_id,))
+    started = now_str()
+    with db.lock:
+        db.conn.execute(
+            "INSERT INTO capture_runs(run_id,case_id,operator,device,os,browser,ip,"
+            "network,tool,tool_ver,started_at,finished_at,clock_source,steps,"
+            "exceptions,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, case_id, "", _plat.node(), "%s %s" % (_plat.system(), _plat.release()),
+             "requests（无浏览器，取服务器原始 HTML）", "", "", TOOL, _tool_ver(),
+             started, "", "local",
+             "对案件条目逐页 GET 详情页并归档原始 HTML；页面不可达时记 absent。", "",
+             started))
+        db.conn.commit()
+
+    client = Client(cfg, verbose=False)
+    got, absent, errs = 0, 0, []
+    for it in items:
+        tid = int(it["tid"])
+        total = db.conn.execute(
+            "SELECT pages_total FROM threads WHERE tid=?", (tid,)).fetchone()
+        n = min(pages, int((total[0] if total else 1) or 1))
+        for page_no in range(1, n + 1):
+            url = THREAD_URL.format(tid=tid, page=page_no)
+            try:
+                html = client.get(url, referer=url).text
+            except HttpError as e:
+                absent += 1
+                errs.append("tid=%s p%s：%s" % (tid, page_no, e))
+                note_missing(db, case_id, tid, url, "http_error: %s" % e, run_id)
+                continue
+            rows = archive_page(db, tid, page_no, url, html, run_id=run_id)
+            if rows:
+                got += len(rows)
+            else:
+                note_missing(db, case_id, tid, url, "no_change（同内容已归档）", run_id)
+        record_snapshot(db, tid, run_id)
+
+    with db.lock:
+        db.conn.execute("UPDATE capture_runs SET finished_at=?, exceptions=? "
+                        "WHERE run_id=?", (now_str(), "\n".join(errs), run_id))
+        db.conn.commit()
+    return {"run_id": run_id, "archived": got, "absent": absent,
+            "errors": errs[:10], "items": len(items)}
+
+
 def _rows(conn, sql: str, args: tuple = ()) -> List[Dict[str, Any]]:
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
@@ -315,12 +466,35 @@ def export_case(db, case_id: str, out_dir: str = "",
         files["content/text/%s.txt" % tid] = _bundle_text(
             th.get("title") or "", th, ps).encode("utf-8")
 
-    files["carrier/README.txt"] = (
-        "P0 阶段尚未采集载体（MHTML / 长截图 / 录屏）。\n"
-        "本包内的正文来自站方 API 的原始响应，属于「内容证据」，不是「载体证据」。\n"
-        "载体补齐是 P1（msyt evidence capture）的工作。\n"
-        "★ 若本包没有 carrier 文件，请勿对外宣称「已固定网页载体」。\n"
-    ).encode("utf-8")
+    # ---- 载体：从 evidence_files 取（采集时已归档的原始 HTML）----
+    car_meta: Dict[str, Dict[str, Any]] = {}
+    missing = []
+    ev_root = evidence_root(db.path)
+    for row in _rows(db.conn, "SELECT * FROM evidence_files WHERE case_id=? "
+                              "ORDER BY id", (case_id,)):
+        rel = row.get("rel_path") or ""
+        if (row.get("kind") or "") == "absent" or not rel:
+            missing.append({"tid": row.get("tid"), "reason": row.get("note") or "",
+                            "url": row.get("source_url") or ""})
+            continue
+        full = os.path.join(ev_root, rel)
+        if not os.path.exists(full):
+            missing.append({"tid": row.get("tid"), "reason": "文件不在磁盘（%s）" % rel,
+                            "url": row.get("source_url") or ""})
+            continue
+        with open(full, "rb") as f:
+            data = f.read()
+        zpath = "carrier/" + rel
+        files[zpath] = data
+        car_meta[zpath] = row
+    if not car_meta:
+        files["carrier/README.txt"] = (
+            "本包没有网页载体文件。\n"
+            "原因见 manifest.json 的 missing_carriers：\n"
+            "  · 采集时该帖尚未进入案件（事后页面已打不开，无法补采）\n"
+            "  · 站方 restricted（仅作者本人可见）\n"
+            "★ 没有 carrier 文件时，请勿对外宣称「已固定网页载体」。\n"
+        ).encode("utf-8")
 
     chain = Chain(db.conn)
     entries = chain.entries()
@@ -332,9 +506,24 @@ def export_case(db, case_id: str, out_dir: str = "",
     # ---- manifest ----
     file_entries = []
     for path, data in sorted(files.items()):
-        file_entries.append({"path": path, "bytes": len(data),
-                             "sha256": sha256_bytes(data), "kind": path.split("/")[0],
-                             "captured_at": now_str(), "source_url": ""})
+        meta = car_meta.get(path) or {}
+        file_entries.append({
+            "path": path, "bytes": len(data), "sha256": sha256_bytes(data),
+            "kind": "carrier" if meta else path.split("/")[0],
+            "captured_at": meta.get("captured_at") or now_str(),
+            "source_url": meta.get("source_url") or "",
+            "http_status": meta.get("http_status"),
+            "capture_limit": meta.get("capture_limit") or "",
+        })
+    _limits = [
+        "时间取自采集机本机时钟，未经第三方时间戳锚定（P2 补）",
+        "站方 restricted 帖无法取得页面，已按平台限制处理，未伪造",
+    ]
+    if car_meta:
+        _limits.insert(0, "载体为采集时刻的**服务器原始 HTML**（非浏览器渲染截图，"
+                          "非 MHTML，未内联图片/CSS）")
+    else:
+        _limits.insert(0, "本包不含网页载体（采集时未进入案件，事后页面已不可达）")
     manifest = {
         "bundle_id": bundle_id,
         "case_id": case_id,
@@ -348,13 +537,11 @@ def export_case(db, case_id: str, out_dir: str = "",
         "items": [{"tid": int(i["tid"]), "role": i.get("role"),
                    "added_by": i.get("added_by"), "added_at": i.get("added_at")} for i in items],
         "files": file_entries,
+        "carriers": len(car_meta),
+        "missing_carriers": missing,
         "chain": {"slice_start": entries[0]["seq"] if entries else 0,
                   "slice_end": head["seq"], "head_hash": head["this_hash"]},
-        "limitations": [
-            "本包不含网页载体（MHTML/截图/录屏），P1 补齐",
-            "时间取自采集机本机时钟，未经第三方时间戳锚定（P2 补）",
-            "站方 restricted 帖无法取得页面，已按平台限制处理，未伪造",
-        ],
+        "limitations": _limits,
         "operator": operator or "",
     }
     man_bytes = json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8")

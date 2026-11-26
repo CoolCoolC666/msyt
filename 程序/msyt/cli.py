@@ -29,8 +29,8 @@ from .config import Config
 from .db import DB
 from .detail import DetailCollector
 from .doctor import format_report, run_doctor
-from .evidence import (ROLES, add_item, create_case, export_case,
-                       list_cases, verify_bundle, verify_case)
+from .evidence import (ROLES, add_item, capture_case, create_case,
+                       export_case, list_cases, verify_bundle, verify_case)
 from .http_client import Client
 from .listpage import ListCollector
 from .sources import describe, expand_sources
@@ -499,6 +499,28 @@ def cmd_evidence_export(args) -> int:
     return 0
 
 
+def cmd_evidence_capture(args) -> int:
+    """补采载体 —— 针对**已经在库里的**案件条目。
+
+    ★ 这是补救，不是主路径：主路径是采集器边采边归档（detail._archive）。
+      页面已经打不开时，这里只会写 absent + exceptions，不伪造任何东西。
+    """
+    cfg = _cfg(args)
+    db = _db(cfg)
+    try:
+        r = capture_case(db, cfg, args.case, pages=args.pages)
+    except (KeyError, ValueError) as e:
+        print("[存证] 补采失败：%s" % e)
+        return 2
+    print("补采完成（run %s）：%d 条目" % (r["run_id"], r["items"]))
+    print("  新归档页面：%d 个" % r["archived"])
+    print("  无法获取  ：%d 个（已记 absent，不算篡改、不算成功）" % r["absent"])
+    for x in r["errors"][:5]:
+        print("    - %s" % x)
+    print("  ★ 补采到的页面同样要 evidence export 才会进证据包")
+    return 0
+
+
 def cmd_custody_verify(args) -> int:
     cfg = _cfg(args) if (args.case or not args.bundle) else None
     if args.bundle:
@@ -638,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--out", default="", help="输出目录（默认 程序/data/evidence）")
     e.add_argument("--operator", default="", help="取证人员（写进 manifest）")
     e.set_defaults(func=cmd_evidence_export)
+    e = esub.add_parser("capture", help="补采载体（页面已不可达时如实记 absent）")
+    e.add_argument("--case", required=True)
+    e.add_argument("--pages", type=int, default=3, help="每条最多补采几页")
+    e.set_defaults(func=cmd_evidence_capture)
 
     sp = sub.add_parser("custody", help="存证：校验")
     usub = sp.add_subparsers(dest="cu_cmd", required=True)

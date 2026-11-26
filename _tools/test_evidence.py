@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.join(PROJ, "程序"))
 
 from msyt.db import DB                              # noqa: E402
 from msyt.evidence import (Chain, _verify_zip, add_item,     # noqa: E402
-                           create_case, export_case, verify_case)
+                           archive_page, create_case, export_case,
+                           record_snapshot, verify_case)
 
 FAILED: list[str] = []
 
@@ -91,8 +92,28 @@ def main() -> int:
                               (c["case_id"],)).fetchone()[0]
     check(n_items == 1, f"重复挂同一条目仍是 1 条（实得 {n_items}）")
 
-    # ---- ② 导出 + 正向三查 ----
-    print("\n--- ② 导出证据包并三查 ---")
+    # ---- ② 载体：随采集归档（模拟 detail 采到那一页时）----
+    print("\n--- ② 载体随采集归档 ---")
+    url = ("https://bbs.cnnb.com.cn/forum.php?mod=viewthread&tid=9001&page=1&extra=page%3D1")
+    page_html = ('<html><head><title>楼道灯坏了三周没人修</title></head>'
+                 '<body><div id="post_900101">楼道灯坏了三周</div></body></html>')
+    got = archive_page(db, 9001, 1, url, page_html)
+    check(len(got) == 1, f"归档 1 页（实得 {len(got)}）")
+    check(got[0]["rel_path"].startswith("pages/9001/p1_"), f"落盘路径 = {got[0]['rel_path']}")
+    check(os.path.exists(os.path.join(tmp, "evidence", got[0]["rel_path"])),
+          "文件确实在磁盘上")
+    again = archive_page(db, 9001, 1, url, page_html)
+    check(len(again) == 0, "同内容重复归档被去重")
+    nf = db.conn.execute("SELECT COUNT(*) FROM evidence_files WHERE kind='html'"
+                         ).fetchone()[0]
+    check(nf == 1, f"evidence_files 里只 1 条（实得 {nf}）")
+    check(archive_page(db, 9999999, 1, "u", "<html/>") == [],
+          "非案件 tid 直接 no-op（61 万帖不会被存成 HTML）")
+    snap = record_snapshot(db, 9001)
+    check(bool(snap) and snap["views"] == 120, f"热度快照写入：{snap}")
+
+    # ---- ③ 导出 + 正向三查 ----
+    print("\n--- ③ 导出证据包并三查 ---")
     ev = export_case(db, c["case_id"], out_dir=os.path.join(tmp, "ev"),
                      operator="测试员")
     check(os.path.exists(ev["zip"]), "zip 已生成")
@@ -107,14 +128,24 @@ def main() -> int:
     check(len(posts) == 2, f"两层正文全在（实得 {len(posts)}）")
     check(man["scope"]["changes"] == 1, "变更史入包")
     check(man["clock_source"] == "local", "时钟来源如实标注 local")
-    check(any("不含网页载体" in x for x in man["limitations"]), "限制条款如实写入")
+    check(man["carriers"] == 1, f"manifest 记录 1 个载体（实得 {man['carriers']}）")
+    check(any(f["path"].startswith("carrier/pages/9001/") for f in man["files"]),
+          "载体文件进了 manifest")
+    check(any(n.startswith("carrier/pages/9001/") for n in names), "载体文件进了 zip")
+    car = next(f for f in man["files"] if f["path"].startswith("carrier/pages/9001/"))
+    check(car["source_url"].endswith("page%3D1"), f"原始 URL 原样记录：{car['source_url'][-24:]}")
+    check(car["http_status"] == 200, "http_status 记录")
+    check(not any("不含网页载体" in x for x in man["limitations"]),
+          "有载体时不再声称「不含载体」")
+    check(any("服务器原始 HTML" in x for x in man["limitations"]),
+          "如实说明载体是原始 HTML 而非截图")
 
     v = verify_case(db, c["case_id"])
     check(v["ok"], "三查全过（zip/包内/链）")
     check(v["outside"]["match_db"], "zip 与库记录的 bundle_sha256 一致")
 
-    # ---- ③ 反向 1：改包内正文 ----
-    print("\n--- ③ ★反向验证 1：改一个字符（同长度，绕开大小校验）---")
+    # ---- ④ 反向 1：改包内正文 ----
+    print("\n--- ④ ★反向验证 1：改一个字符（同长度，绕开大小校验）---")
     bad_zip = os.path.join(tmp, "bad.zip")
     with zipfile.ZipFile(ev["zip"]) as z:
         items = {n: z.read(n) for n in z.namelist()}
