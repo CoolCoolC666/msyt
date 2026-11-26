@@ -38,6 +38,6 @@ msyt —— 民生e网通「群众留言板」舆情采集器
     cli.py         命令行
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["config", "http_client", "taxonomy", "sources", "parsers",
            "textutil", "db", "listpage", "detail", "doctor", "cli"]

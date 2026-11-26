@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msyt"
-version = "1.0.0"
+version = "1.1.0"
 description = "民生e点通·天一论坛 群众留言板（fid=1176）舆情采集器"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "仅供教学分析使用" }
+license = { text = "MIT" }
 dependencies = [
     "requests>=2.28",
     "beautifulsoup4>=4.11",

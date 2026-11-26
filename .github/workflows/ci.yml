@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install fastapi uvicorn pydantic requests beautifulsoup4 PyJWT pypinyin jieba
+
+      - name: Python 回归闸（离线子集）
+        run: |
+          set -e
+          for t in \
+            test_cmd_encoding.py \
+            test_web_layout.py \
+            test_post_time.py \
+            test_summarize.py \
+            test_review_ledger.py \
+            test_topic_naming.py \
+            test_export_columns.py \
+            test_keywords.py \
+            test_thread_tags.py
+          do
+            echo "===== $t ====="
+            python "_tools/$t"
+          done
+
+      - name: 前端回归闸
+        run: |
+          set -e
+          for t in test_int_state.js test_bar_layout.js
+          do
+            echo "===== $t ====="
+            node "_tools/$t"
+          done
+
+      # 说明：不跑 run_all_tests.py。
+      # 该脚本包含会访问站方/本机 8765 的用例，CI 里没有这些外部依赖；
+      # 这里只挑「纯离线、可独立运行」的闸作为合并前门禁。
