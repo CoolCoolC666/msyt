@@ -144,6 +144,37 @@ def main() -> int:
         check("★ 同样的行再采一遍 → **不再产生新留痕**（值没变）",
               n1 == n0, f"{n0} → {n1}")
 
+        print("\n=== ④.5 ★置顶帖噪声：截断标题 / 重复变更都不许再记 ===")
+        # 真实现场：置顶公告每页都出现，列表页给的是**截断标题**（以 … 结尾），
+        # 库里是详情页来的全称 → 每翻一页都"比出一次标题被修改"（实测 2,644 条噪声）。
+        with db.lock:
+            db.conn.execute(
+                "INSERT OR REPLACE INTO threads(tid,title,state,replies,detail_state,"
+                "posts_n) VALUES(90000020,"
+                "'必读公告：中国宁波网民生e点通（天一论坛“我要问政”）管理规定',"
+                "'',78,'done',12)")
+            db.conn.commit()
+        trunc = "必读公告：中国宁波网民生e点通（天一论坛“我要问政”…"
+        n_before = len([x for x in db.list_changes() if x["tid"] == 90000020])
+        for _ in range(3):
+            db.record_list_changes("dept:495", [
+                Row(tid=90000020, title=trunc, state="", replies=78,
+                    url="u", category="c", dept_id="495")])
+        n_after = len([x for x in db.list_changes() if x["tid"] == 90000020])
+        check("★ 截断标题不算「标题被修改」", n_after == n_before,
+              f"{n_before} → {n_after}")
+
+        with db.lock:
+            db.conn.execute("UPDATE threads SET title='丁帖' WHERE tid=90000020")
+            db.conn.commit()
+        rep = [Row(tid=90000020, title="丁帖（站方改过）", state="", replies=78,
+                   url="u", category="c", dept_id="495")]
+        first = db.record_list_changes("dept:495", rep)
+        again = db.record_list_changes("dept:495", rep)
+        check("★ 同一条变更重复出现只记一次",
+              bool(first.get("title")) and not again.get("title"),
+              f"第一次 {bool(first.get('title'))} / 第二次 {bool(again.get('title'))}")
+
         print("\n=== ⑤ 列表采集那条路：受理状态变了 → 标 stale 待重采 ===")
         from msyt.listpage import ListCollector
         from msyt.sources import Source

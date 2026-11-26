@@ -1654,6 +1654,24 @@ class DB:
         old = {int(r["tid"]): r for r in self.conn.execute(
             f"SELECT tid,title,state,replies FROM threads WHERE tid IN ({q})",
             tids)}
+        # ★ 2026-11-26：同一条变更**不要反复记**。
+        #   原因（实测）：置顶公告帖每页都出现，列表页给的是**被截断的标题**，
+        #   与库里（详情页来的）全称永久不等 → 每翻一页记一次「标题被修改」，
+        #   tid=6177045 历史累积 2,644 条假变更，把「站方编辑史」淹了。
+        #   两道闸：① 截断标题（以 …/... 结尾）不判定为修改；
+        #            ② 与上一条同 (tid,kind) 的 new_val 相同就不再记。
+        last: Dict[tuple, str] = {}
+        for r in self.conn.execute(
+                f"SELECT tid,kind,new_val FROM list_changes WHERE tid IN ({q}) "
+                "ORDER BY id", tids):
+            last[(int(r["tid"]), str(r["kind"] or ""))] = str(r["new_val"] or "")
+
+        def _already(tid: int, kind: str, val: str) -> bool:
+            return last.get((tid, kind)) == (val or "")
+
+        def _truncated(s: str) -> bool:
+            s = (s or "").rstrip()
+            return s.endswith("…") or s.endswith("...")
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         out: Dict[str, List[Dict[str, Any]]] = {}
         records: List[tuple] = []
@@ -1673,7 +1691,7 @@ class DB:
             # ---- 受理状态 ----
             new_state = str(self._row_val(r, "state", "") or "")
             old_state = str(o["state"] or "")
-            if new_state != old_state:
+            if new_state != old_state and not _already(tid, "state", new_state):
                 out.setdefault("state", []).append(
                     {"tid": tid, "old": old_state, "new": new_state})
                 records.append((now, source, tid, "state", old_state, new_state,
@@ -1681,7 +1699,7 @@ class DB:
             # ---- 回复数 ----
             new_rep = int(self._row_val(r, "replies", 0) or 0)
             old_rep = int(o["replies"] or 0)
-            if new_rep != old_rep:
+            if new_rep != old_rep and not _already(tid, "replies", str(new_rep)):
                 out.setdefault("replies", []).append(
                     {"tid": tid, "old": str(old_rep), "new": str(new_rep)})
                 records.append((now, source, tid, "replies", str(old_rep),
@@ -1689,7 +1707,9 @@ class DB:
             # ---- 标题 ----
             new_title = str(self._row_val(r, "title", "") or "")
             old_title = str(o["title"] or "")
-            if new_title and old_title and new_title != old_title:
+            if (new_title and old_title and new_title != old_title
+                    and not _truncated(new_title) and not _truncated(old_title)
+                    and not _already(tid, "title", new_title)):
                 out.setdefault("title", []).append(
                     {"tid": tid, "old": old_title, "new": new_title})
                 records.append((now, source, tid, "title", old_title[:120],
