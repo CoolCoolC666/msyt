@@ -82,7 +82,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:                                 # noqa: BLE001
         pass
 
-app = FastAPI(title="民生e点通 · 舆情采集器", version="1.1.0",
+app = FastAPI(title="民生e点通 · 舆情采集器", version="1.2.0",
               description="本地 Web 前端。所有数据来自本机 SQLite，不做任何写操作到站方。")
 
 
